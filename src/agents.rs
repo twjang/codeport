@@ -39,6 +39,43 @@ pub fn protocol(agent: &str) -> Result<Protocol> {
     }
 }
 
+/// OpenCode 2's shared server cannot inherit this launch's bridge configuration.
+/// Probe the CLI so OpenCode 1, which has no --standalone flag, still works.
+pub async fn opencode_args(args: &[String]) -> Result<Vec<String>> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new("opencode")
+            .arg("--help")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("Timed out checking OpenCode's supported launch options")?
+    .context("could not launch opencode; install the agent and ensure it is on PATH")?;
+    anyhow::ensure!(output.status.success(), "OpenCode --help failed");
+    Ok(opencode_session_args(
+        args,
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .any(|word| word == "--standalone"),
+    ))
+}
+
+fn opencode_session_args(args: &[String], standalone: bool) -> Vec<String> {
+    let mut args = args.to_vec();
+    let end = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    if standalone && !args[..end].iter().any(|arg| arg == "--standalone") {
+        // Put the flag after the subcommand, but before any literal arguments.
+        // OpenCode 2 rejects `opencode --standalone run ...`.
+        args.insert(end, "--standalone".to_owned());
+    }
+    args
+}
+
 /// `base_url` is the bridge origin (e.g. http://127.0.0.1:1234), without /v1.
 /// Credentials here authenticate only to the local bridge, never the upstream.
 pub fn prepare(
@@ -241,6 +278,19 @@ fn pi_extension(base: &str, api: &str, token: &str, model: Option<&str>) -> Stri
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    #[test]
+    fn opencode_standalone_preserves_subcommands_and_literal_arguments() {
+        let args = ["run", "--", "literal prompt"].map(str::to_owned);
+        assert_eq!(opencode_session_args(&args, false), args);
+        assert_eq!(
+            opencode_session_args(&args, true),
+            ["run", "--standalone", "--", "literal prompt"]
+        );
+        assert_eq!(opencode_session_args(&[], true), ["--standalone"]);
+        let explicit = ["run", "--standalone", "prompt"].map(str::to_owned);
+        assert_eq!(opencode_session_args(&explicit, true), explicit);
+    }
+
     fn env(command: &Command, name: &str) -> Option<String> {
         command
             .get_envs()

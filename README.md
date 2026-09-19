@@ -14,6 +14,26 @@ cargo build --locked --release
 ./target/release/launchcoder codex
 ```
 
+To build and install the executable on your Cargo `PATH`:
+
+```sh
+cargo install --locked --path .
+```
+
+On macOS, if a clean build fails with `linking with cc failed` and an Xcode
+license message, select the standalone Command Line Tools for the build (if
+installed):
+
+```sh
+DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo build --locked --release
+# Or, to install:
+DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo install --locked --path .
+```
+
+This selection applies only to that command. To use the full Xcode installation,
+run `sudo xcodebuild -license` to review and accept its license, then retry the
+original build command.
+
 In the configuration UI, add a backend with its API base URL and protocol, then bind an agent to that backend. Credentials and settings are saved after each completed action. The UI displays the configuration file location.
 
 After placing the binary on your `PATH`:
@@ -91,6 +111,26 @@ Authentication can be `null`, a bearer token, or HTTP Basic. Only one authentica
 
 Model precedence is CLI `--model`, agent binding, then backend default. Missing or `null` fields inherit the next default. An explicit empty string suppresses a model override and preserves the model requested by the agent. In the UI, leaving a model field blank stores `null`; leave both the binding and backend model blank to preserve the agent's selection.
 
+Use the exact model ID advertised by your backend's `/v1/models` endpoint,
+including any namespace. For example, the verified local Qwen backend requires
+`unsloth/Qwen3.8-27B-GGUF`; the shortened name `Qwen3.8-27B-GGUF` returned a
+model-not-found error. Save the full ID as the backend model in `launchcoder -cfg`,
+or override it for one session:
+
+```sh
+launchcoder opencode --model unsloth/Qwen3.8-27B-GGUF
+```
+
+To check a configured OpenCode backend without opening the interactive UI:
+
+```sh
+launchcoder opencode -- run --format json 'Reply with only OK. Do not use tools or change any files.'
+```
+
+If the backend returns `401 Unauthorized`, update its authentication settings in
+`launchcoder -cfg`. For `404` model errors, check the exact model ID and whether
+the server has loaded that model or allows switching models by request.
+
 ## Backend access
 
 Set `access` to `null` for direct access, or configure a command:
@@ -113,9 +153,14 @@ For cross-protocol launches, the Codex adapter disables its default reasoning an
 
 Translation is not complete API emulation. Opaque reasoning state, multimodal content, built-in hosted tools, and other features without a supported mapping produce explicit errors instead of silently losing data. An agent or backend that requires those features may need a matching protocol or different agent settings.
 
-Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0, Claude Code 2.1.208, Pi 0.85.1, and OpenCode 1.18.31. These checks exercise the launcher and actual agent processes, but no live or paid model backend has been tested. Compatibility with other agent releases or backend implementations still needs verification.
+Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0, Claude Code 2.1.208, Pi 0.85.1, and OpenCode 1.18.31 and 2.0.10. OpenCode 2.0.10 has also completed a live text request against a local Unsloth backend serving `unsloth/Qwen3.8-27B-GGUF`. Live tool use and paid model backends have not been verified. Compatibility with other agent releases or backend implementations still needs verification.
 
 With no explicit model, OpenCode preserves saved selections from its native OpenAI or Anthropic providers. Configure a model override for other provider selections.
+
+For OpenCode 2, the launcher automatically selects `--standalone` so its private
+server receives the session's local provider and model configuration. The shared
+background server does not inherit these settings. OpenCode 1 retains its existing
+launch behavior.
 
 To reproduce the Pi/OpenCode checks with isolated package installation:
 
@@ -138,7 +183,7 @@ cargo fmt --all -- --check
 python3 scripts/smoke_tui.py
 ```
 
-CI runs these checks on Linux and macOS, plus an MSRV check on Rust 1.86. Release-mode artifact jobs target:
+CI runs these checks on Linux and macOS, plus an MSRV check on Rust 1.86 that also exercises `cargo install --path .` with fresh dependency resolution. Release-mode artifact jobs target:
 
 | Platform | Rust target | Build method |
 | --- | --- | --- |

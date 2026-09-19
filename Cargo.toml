@@ -21,6 +21,9 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+# Transitive via reqwest/ICU: 0.8.3 uses str::from_utf8, unavailable on Rust 1.86.
+# Keep unlocked installs compatible with our MSRV.
+yoke-derive = "=0.8.2"
 
 [profile.release]
 lto = true

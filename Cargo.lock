@@ -672,6 +672,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "yoke-derive",
 ]
 
 [[package]]

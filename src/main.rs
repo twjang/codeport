@@ -128,12 +128,17 @@ async fn launch(
     }
     let upstream_protocol = backend.protocol;
     let bridge = bridge::Bridge::start(backend, model.clone()).await?;
+    let args = if agent == "opencode" {
+        agents::opencode_args(args).await?
+    } else {
+        args.to_vec()
+    };
     let mut launch = agents::prepare(
         agent,
         &bridge.base_url,
         &bridge.token,
         model.as_deref(),
-        args,
+        &args,
         upstream_protocol,
     )?;
     let mut child =
