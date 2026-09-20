@@ -28,7 +28,7 @@ fn fixture(
             "cleanup":format!("printf cleaned > {}",quote(&directory.path().join("cleanup")))
         }}},"agents":{"codex":{"backend":"test"}}
     })).unwrap()).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_launchcoder"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codeport"));
     command
         .arg("--config")
         .arg(&config)
@@ -105,7 +105,7 @@ fn sigterm_during_preparation_runs_cleanup() {
 
 #[test]
 fn cfg_alias_and_forwarding_help() {
-    let output = Command::new(env!("CARGO_BIN_EXE_launchcoder"))
+    let output = Command::new(env!("CARGO_BIN_EXE_codeport"))
         .args(["-cfg", "--help"])
         .output()
         .unwrap();

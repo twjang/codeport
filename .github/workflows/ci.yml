@@ -39,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
       - name: Verify unlocked installation on MSRV
-        run: cargo install --path . --root "${{ runner.temp }}/launchcoder-install"
+        run: cargo install --path . --root "${{ runner.temp }}/codeport-install"
 
   artifacts:
     name: Build ${{ matrix.target }}
@@ -80,9 +80,9 @@ jobs:
         run: cargo build --locked --release --target "${{ matrix.target }}"
       - name: Package binary
         shell: bash
-        run: tar -czf "launchcoder-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" launchcoder
+        run: tar -czf "codeport-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" codeport
       - uses: actions/upload-artifact@v4
         with:
-          name: launchcoder-${{ matrix.target }}
-          path: launchcoder-${{ matrix.target }}.tar.gz
+          name: codeport-${{ matrix.target }}
+          path: codeport-${{ matrix.target }}.tar.gz
           if-no-files-found: error

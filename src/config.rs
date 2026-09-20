@@ -78,8 +78,8 @@ pub struct AgentBinding {
 pub fn config_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
-        .context("HOME is not set; cannot locate launchcoder configuration")?;
-    Ok(PathBuf::from(home).join(".config/launchcoder/credential.json"))
+        .context("HOME is not set; cannot locate codeport configuration")?;
+    Ok(PathBuf::from(home).join(".config/codeport/credential.json"))
 }
 
 impl Config {
@@ -248,7 +248,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "launchcoder-config-test-{}-{nonce}",
+            "codeport-config-test-{}-{nonce}",
             std::process::id()
         ));
         let path = directory.join("credential.json");

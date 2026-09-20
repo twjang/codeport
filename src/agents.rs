@@ -25,7 +25,7 @@ impl AgentLaunch {
     pub fn take_command(&mut self) -> Command {
         std::mem::replace(
             &mut self.command,
-            Command::new("launchcoder-command-already-taken"),
+            Command::new("codeport-command-already-taken"),
         )
     }
 }
@@ -96,11 +96,11 @@ pub fn prepare(
         agent
     });
     let mut extension = None;
-    command.env("LAUNCHCODER_API_KEY", token);
+    command.env("CODEPORT_API_KEY", token);
     match agent {
         "codex" => {
             if upstream_protocol != Protocol::Responses {
-                eprintln!("launchcoder: protocol conversion disables Codex reasoning and provider-hosted search for this session");
+                eprintln!("codeport: protocol conversion disables Codex reasoning and provider-hosted search for this session");
                 for setting in [
                     "model_reasoning_effort=\"none\"",
                     "model_reasoning_summary=\"none\"",
@@ -113,13 +113,13 @@ pub fn prepare(
             // CLI overrides retain the user's sessions, tools, permissions and settings.
             // JSON quoted strings are also valid TOML basic strings for these values.
             for setting in [
-                "model_provider=\"launchcoder\"".to_owned(),
-                "model_providers.launchcoder.name=\"launchcoder\"".to_owned(),
-                format!("model_providers.launchcoder.base_url={}", json!(api)),
-                "model_providers.launchcoder.env_key=\"LAUNCHCODER_API_KEY\"".to_owned(),
-                "model_providers.launchcoder.wire_api=\"responses\"".to_owned(),
-                "model_providers.launchcoder.requires_openai_auth=false".to_owned(),
-                "model_providers.launchcoder.supports_websockets=false".to_owned(),
+                "model_provider=\"codeport\"".to_owned(),
+                "model_providers.codeport.name=\"codeport\"".to_owned(),
+                format!("model_providers.codeport.base_url={}", json!(api)),
+                "model_providers.codeport.env_key=\"CODEPORT_API_KEY\"".to_owned(),
+                "model_providers.codeport.wire_api=\"responses\"".to_owned(),
+                "model_providers.codeport.requires_openai_auth=false".to_owned(),
+                "model_providers.codeport.supports_websockets=false".to_owned(),
             ] {
                 command.args(["-c", &setting]);
             }
@@ -129,7 +129,7 @@ pub fn prepare(
         }
         "claude" | "claude-code" => {
             if upstream_protocol != Protocol::Anthropic {
-                eprintln!("launchcoder: protocol conversion disables Claude extended thinking for this session");
+                eprintln!("codeport: protocol conversion disables Claude extended thinking for this session");
                 command
                     .env("MAX_THINKING_TOKENS", "0")
                     .env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1");
@@ -162,7 +162,7 @@ pub fn prepare(
         }
         "pi" => {
             let mut file = tempfile::Builder::new()
-                .prefix("launchcoder-")
+                .prefix("codeport-")
                 .suffix(".ts")
                 .tempfile()
                 .context("Creating temporary Pi provider extension")?;
@@ -171,7 +171,7 @@ pub fn prepare(
             file.flush()?;
             command.arg("--extension").arg(file.path());
             if let Some(model) = model {
-                command.args(["--provider", "launchcoder", "--model", model]);
+                command.args(["--provider", "codeport", "--model", model]);
             }
             extension = Some(file);
         }
@@ -188,11 +188,11 @@ fn opencode_config(api: &str, token: &str, model: Option<&str>) -> Value {
     if let Some(model) = model {
         json!({
             "$schema":"https://opencode.ai/config.json",
-            "enabled_providers":["launchcoder"],
-            "model":format!("launchcoder/{model}"),
-            "small_model":format!("launchcoder/{model}"),
-            "provider":{"launchcoder":{
-                "npm":"@ai-sdk/openai-compatible", "name":"launchcoder",
+            "enabled_providers":["codeport"],
+            "model":format!("codeport/{model}"),
+            "small_model":format!("codeport/{model}"),
+            "provider":{"codeport":{
+                "npm":"@ai-sdk/openai-compatible", "name":"codeport",
                 "options":{"baseURL":api,"apiKey":token},
                 "models":{(model):{"name":model,"tool_call":true}}
             }}
@@ -225,9 +225,7 @@ fn pi_extension(base: &str, api: &str, token: &str, model: Option<&str>) -> Stri
                 "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
                 "contextWindow":128000,"maxTokens":16384}]
         });
-        script.push_str(&format!(
-            "  pi.registerProvider('launchcoder', {provider});\n"
-        ));
+        script.push_str(&format!("  pi.registerProvider('codeport', {provider});\n"));
     }
     // Event exceptions are caught by Pi, so routing failures must terminate the
     // child explicitly. Re-register the selected model under our provider while
@@ -241,24 +239,24 @@ fn pi_extension(base: &str, api: &str, token: &str, model: Option<&str>) -> Stri
     ));
     script.push_str(r#"  let routing = false;
   const fail = (error) => {
-    process.stderr.write(`launchcoder: ${error instanceof Error ? error.message : error}\n`);
+    process.stderr.write(`codeport: ${error instanceof Error ? error.message : error}\n`);
     process.exit(2);
   };
   const route = async (_event, ctx) => {
-    if (routing || !ctx.model || ctx.model.provider === 'launchcoder') return;
+    if (routing || !ctx.model || ctx.model.provider === 'codeport') return;
     routing = true;
     try {
       const selected = ctx.model;
       if (!['openai-completions', 'openai-responses', 'anthropic-messages'].includes(selected.api)) {
-        fail(`Cannot route Pi API ${selected.api}; select an OpenAI/Anthropic compatible model or configure a model in launchcoder`);
+        fail(`Cannot route Pi API ${selected.api}; select an OpenAI/Anthropic compatible model or configure a model in codeport`);
       }
       const baseUrl = selected.api === 'anthropic-messages' ? origin : api;
-      pi.registerProvider('launchcoder', {
+      pi.registerProvider('codeport', {
         baseUrl, apiKey: token, api: selected.api,
         headers: { Authorization: `Bearer ${token}` },
-        models: [{ ...selected, provider: 'launchcoder', baseUrl }]
+        models: [{ ...selected, provider: 'codeport', baseUrl }]
       });
-      const model = ctx.modelRegistry.find('launchcoder', selected.id);
+      const model = ctx.modelRegistry.find('codeport', selected.id);
       if (!model || !(await pi.setModel(model))) fail('Unable to configure selected Pi model for the local bridge');
     } catch (error) {
       fail(error);
@@ -407,9 +405,9 @@ mod tests {
     #[test]
     fn opencode_registers_custom_model() {
         let config = opencode_config("http://localhost/v1", "token", Some("local/model"));
-        assert_eq!(config["model"], "launchcoder/local/model");
+        assert_eq!(config["model"], "codeport/local/model");
         assert_eq!(
-            config["provider"]["launchcoder"]["models"]["local/model"]["tool_call"],
+            config["provider"]["codeport"]["models"]["local/model"]["tool_call"],
             true
         );
     }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise installed Pi/OpenCode through launchcoder and a local mock backend.
+"""Exercise installed Pi/OpenCode through codeport and a local mock backend.
 
-Usage: python3 scripts/smoke_open_agents.py --launcher target/debug/launchcoder \
-  --agent-bin /private/tmp/launchcoder-smoke-tools/node_modules/.bin [pi|opencode|all]
+Usage: python3 scripts/smoke_open_agents.py --launcher target/debug/codeport \
+  --agent-bin /private/tmp/codeport-smoke-tools/node_modules/.bin [pi|opencode|all]
 No real credentials are inherited; agent state is isolated with application-specific and XDG directories.
 The mock requests only a read of a temporary fixture, then checks its tool result.
 """
@@ -16,9 +16,9 @@ import subprocess
 import tempfile
 import threading
 
-TOKEN = "launchcoder-smoke-upstream-token"
-ANSWER = "LAUNCHCODER_OPEN_AGENT_OK"
-FIXTURE = "launchcoder-tool-fixture-content"
+TOKEN = "codeport-smoke-upstream-token"
+ANSWER = "CODEPORT_OPEN_AGENT_OK"
+FIXTURE = "codeport-tool-fixture-content"
 
 
 class Mock(http.server.BaseHTTPRequestHandler):
@@ -81,7 +81,7 @@ class Mock(http.server.BaseHTTPRequestHandler):
 
 
 def run(agent, launcher, agent_bin, test_tools):
-    with tempfile.TemporaryDirectory(prefix="launchcoder-open-smoke-", dir="/private/tmp" if Path("/private/tmp").is_dir() else "/tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="codeport-open-smoke-", dir="/private/tmp" if Path("/private/tmp").is_dir() else "/tmp") as directory:
         root = Path(directory).resolve()
         fixture = root / "fixture.txt"
         fixture.write_text(FIXTURE)
@@ -104,7 +104,7 @@ def run(agent, launcher, agent_bin, test_tools):
                     "http_proxy": origin, "https_proxy": origin, "NO_PROXY": "127.0.0.1,localhost",
                     "no_proxy": "127.0.0.1,localhost", "OPENCODE_DISABLE_MODELS_FETCH": "true",
                     "OPENCODE_DISABLE_AUTOUPDATE": "true", "PI_SKIP_VERSION_CHECK": "1"})
-        prompt = "Read fixture.txt, then reply LAUNCHCODER_OPEN_AGENT_OK." if test_tools else "Reply LAUNCHCODER_OPEN_AGENT_OK."
+        prompt = "Read fixture.txt, then reply CODEPORT_OPEN_AGENT_OK." if test_tools else "Reply CODEPORT_OPEN_AGENT_OK."
         args = ["--print", "--no-session", prompt] if agent == "pi" else ["run", "--format", "json", prompt]
         command = [str(launcher), "--config", str(config), agent, "--", *args]
         try:
@@ -140,7 +140,7 @@ def run(agent, launcher, agent_bin, test_tools):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("agent", choices=["pi", "opencode", "all"], nargs="?", default="all")
-    parser.add_argument("--launcher", type=Path, default=Path("target/debug/launchcoder"))
+    parser.add_argument("--launcher", type=Path, default=Path("target/debug/codeport"))
     parser.add_argument("--agent-bin", type=Path)
     options = parser.parse_args()
     agents = ["pi", "opencode"] if options.agent == "all" else [options.agent]

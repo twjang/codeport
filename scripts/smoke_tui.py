@@ -13,8 +13,8 @@ import time
 
 
 def main():
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/launchcoder").resolve()
-    with tempfile.TemporaryDirectory(prefix="launchcoder-tui-") as directory:
+    binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/codeport").resolve()
+    with tempfile.TemporaryDirectory(prefix="codeport-tui-") as directory:
         config = Path(directory) / "settings" / "credential.json"
         master, slave = pty.openpty()
         child = subprocess.Popen([str(binary), "--config", str(config), "-cfg"],

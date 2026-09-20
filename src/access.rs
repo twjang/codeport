@@ -120,8 +120,8 @@ impl AccessSession {
                     let completed = matches!(result, Ok(Ok(())));
                     match result {
                         Ok(Ok(())) => {}
-                        Ok(Err(error)) => eprintln!("launchcoder: cleanup command error: {error}"),
-                        Err(_) => eprintln!("launchcoder: cleanup command timed out"),
+                        Ok(Err(error)) => eprintln!("codeport: cleanup command error: {error}"),
+                        Err(_) => eprintln!("codeport: cleanup command timed out"),
                     }
                     if let Some(group) = group {
                         signal_group(group, libc::SIGTERM);
@@ -130,13 +130,13 @@ impl AccessSession {
                     }
                     match child.wait().await {
                         Ok(status) if completed && !status.success() => {
-                            eprintln!("launchcoder: cleanup command failed: {status}")
+                            eprintln!("codeport: cleanup command failed: {status}")
                         }
-                        Err(error) => eprintln!("launchcoder: cleanup wait failed: {error}"),
+                        Err(error) => eprintln!("codeport: cleanup wait failed: {error}"),
                         _ => {}
                     }
                 }
-                Err(error) => eprintln!("launchcoder: could not start cleanup command: {error}"),
+                Err(error) => eprintln!("codeport: could not start cleanup command: {error}"),
             }
         }
         if let Some(group) = self.group.take() {

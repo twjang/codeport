@@ -60,7 +60,7 @@ impl Bridge {
             .with_state(state);
         let task = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
-                eprintln!("launchcoder: local API bridge stopped: {error}");
+                eprintln!("codeport: local API bridge stopped: {error}");
             }
         });
         Ok(Self {
@@ -92,7 +92,7 @@ async fn models(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Re
     let models = state
         .model
         .iter()
-        .map(|m| json!({"id":m,"object":"model","created":0,"owned_by":"launchcoder"}))
+        .map(|m| json!({"id":m,"object":"model","created":0,"owned_by":"codeport"}))
         .collect::<Vec<_>>();
     Json(json!({"object":"list","data":models})).into_response()
 }
@@ -260,7 +260,7 @@ fn sse_response(body: Body) -> Response {
 fn error(status: StatusCode, message: &str) -> Response {
     (
         status,
-        Json(json!({"type":"error","error":{"type":"launchcoder_error","message":message}})),
+        Json(json!({"type":"error","error":{"type":"codeport_error","message":message}})),
     )
         .into_response()
 }
@@ -268,7 +268,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 fn stream_error(message: &str) -> Bytes {
     Bytes::from(format!(
         "event: error\ndata: {}\n\n",
-        json!({"type":"error","error":{"type":"launchcoder_error","message":message}})
+        json!({"type":"error","error":{"type":"codeport_error","message":message}})
     ))
 }
 

@@ -1,8 +1,8 @@
-# launchcoder
+# codeport
 
 Launch Pi, OpenCode, Codex, or Claude Code against your own OpenAI- or Anthropic-compatible model backend. A local API bridge adapts protocols, while optional access commands prepare a tunnel, proxy, or other connection before the agent starts.
 
-`launchcoder` is a Rust executable for Linux and macOS. Coding agents and any access utilities must already be installed and available on `PATH`.
+`codeport` is a Rust executable for Linux and macOS. Coding agents and any access utilities must already be installed and available on `PATH`.
 
 ## Quick start
 
@@ -10,8 +10,8 @@ Build with Rust 1.86 or newer:
 
 ```sh
 cargo build --locked --release
-./target/release/launchcoder -cfg
-./target/release/launchcoder codex
+./target/release/codeport -cfg
+./target/release/codeport codex
 ```
 
 To build and install the executable on your Cargo `PATH`:
@@ -39,13 +39,13 @@ In the configuration UI, add a backend with its API base URL and protocol, then 
 After placing the binary on your `PATH`:
 
 ```sh
-launchcoder pi
-launchcoder opencode --backend home-gpu
-launchcoder codex --model my-coding-model
-launchcoder claude -- --continue
-launchcoder -cfg
-launchcoder --config ./credential.json -cfg
-launchcoder --config ./credential.json codex
+codeport pi
+codeport opencode --backend home-gpu
+codeport codex --model my-coding-model
+codeport claude -- --continue
+codeport -cfg
+codeport --config ./credential.json -cfg
+codeport --config ./credential.json codex
 ```
 
 Use `--` to forward arguments to the installed agent. Agent sessions run in the current directory. Process-specific settings and temporary files connect agents to the local bridge without rewriting their persistent configuration.
@@ -57,10 +57,16 @@ The launcher gives interactive agents the foreground terminal and restores it af
 On both Linux and macOS, the file is:
 
 ```text
-~/.config/launchcoder/credential.json
+~/.config/codeport/credential.json
 ```
 
 `--config PATH` selects an alternate credential file for both configuration UI and launching. Without it, the default path above is used.
+
+If upgrading from `launchcoder`, copy your existing
+`~/.config/launchcoder/credential.json` to `~/.config/codeport/credential.json`
+with directory permissions `0700` and file permissions `0600`. Alternatively,
+use `codeport --config ~/.config/launchcoder/credential.json opencode` to keep
+using the existing file. The configuration format is unchanged.
 
 The file contains both configuration and credentials. Writes use an atomic replacement with file permissions `0600`; newly created configuration directories use `0700`. Existing parent directory permissions are preserved, including when using `--config`. Loading an existing regular file corrects its permissions to `0600`; a symbolic link is rejected. Credentials are plaintext, protected by filesystem permissions, and are masked in interactive password prompts.
 
@@ -114,21 +120,21 @@ Model precedence is CLI `--model`, agent binding, then backend default. Missing 
 Use the exact model ID advertised by your backend's `/v1/models` endpoint,
 including any namespace. For example, the verified local Qwen backend requires
 `unsloth/Qwen3.8-27B-GGUF`; the shortened name `Qwen3.8-27B-GGUF` returned a
-model-not-found error. Save the full ID as the backend model in `launchcoder -cfg`,
+model-not-found error. Save the full ID as the backend model in `codeport -cfg`,
 or override it for one session:
 
 ```sh
-launchcoder opencode --model unsloth/Qwen3.8-27B-GGUF
+codeport opencode --model unsloth/Qwen3.8-27B-GGUF
 ```
 
 To check a configured OpenCode backend without opening the interactive UI:
 
 ```sh
-launchcoder opencode -- run --format json 'Reply with only OK. Do not use tools or change any files.'
+codeport opencode -- run --format json 'Reply with only OK. Do not use tools or change any files.'
 ```
 
 If the backend returns `401 Unauthorized`, update its authentication settings in
-`launchcoder -cfg`. For `404` model errors, check the exact model ID and whether
+`codeport -cfg`. For `404` model errors, check the exact model ID and whether
 the server has loaded that model or allows switching models by request.
 
 ## Backend access
@@ -165,12 +171,12 @@ launch behavior.
 To reproduce the Pi/OpenCode checks with isolated package installation:
 
 ```sh
-npm --prefix /tmp/launchcoder-smoke-tools install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.85.1 opencode-ai@1.18.31
+npm --prefix /tmp/codeport-smoke-tools install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.85.1 opencode-ai@1.18.31
 cargo build --locked
-python3 scripts/smoke_open_agents.py --launcher target/debug/launchcoder --agent-bin /tmp/launchcoder-smoke-tools/node_modules/.bin
+python3 scripts/smoke_open_agents.py --launcher target/debug/codeport --agent-bin /tmp/codeport-smoke-tools/node_modules/.bin
 ```
 
-For installed Codex and Claude Code clients, run `python3 scripts/smoke_agents.py --launcher target/debug/launchcoder`.
+For installed Codex and Claude Code clients, run `python3 scripts/smoke_agents.py --launcher target/debug/codeport`.
 
 The smoke harness creates temporary per-agent configuration directories, uses fake credentials and a local streaming backend, and asks each agent to read a temporary fixture before completing. HTTP proxy settings reject external proxy requests; no upstream model credentials are inherited. Pi's current package name follows its [official installation documentation](https://github.com/earendil-works/pi/tree/main/packages/coding-agent).
 

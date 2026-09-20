@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 #[derive(Clone, Default)]
 pub struct CustomTools(std::collections::BTreeMap<String, bool>, bool);
 
-const SEARCH_TOOL: &str = "launchcoder_tool_search";
+const SEARCH_TOOL: &str = "codeport_tool_search";
 
 fn response_tools(request: &Value) -> Result<Vec<Value>> {
     let mut tools = request["tools"].as_array().cloned().unwrap_or_default();

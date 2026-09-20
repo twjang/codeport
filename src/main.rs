@@ -48,7 +48,7 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("launchcoder: {error:#}");
+            eprintln!("codeport: {error:#}");
             ExitCode::FAILURE
         }
     }
@@ -61,7 +61,7 @@ async fn run(cli: Cli) -> Result<u8> {
     }
     let agent = cli
         .agent
-        .context("specify an agent (pi, opencode, codex, claude), or run launchcoder -cfg")?;
+        .context("specify an agent (pi, opencode, codex, claude), or run codeport -cfg")?;
     let agent = if agent == "claude-code" {
         "claude".to_owned()
     } else {
@@ -77,11 +77,11 @@ async fn run(cli: Cli) -> Result<u8> {
         .backend
         .as_deref()
         .or_else(|| binding.map(|b| b.backend.as_str()))
-        .context("no backend selected; run launchcoder -cfg or supply --backend NAME")?;
+        .context("no backend selected; run codeport -cfg or supply --backend NAME")?;
     let backend = config
         .backends
         .get(backend_name)
-        .with_context(|| format!("backend {backend_name:?} does not exist; run launchcoder -cfg"))?
+        .with_context(|| format!("backend {backend_name:?} does not exist; run codeport -cfg"))?
         .clone();
     let model = cli
         .model
