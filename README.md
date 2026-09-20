@@ -1,56 +1,35 @@
 # codeport
 
-Launch Pi, OpenCode, Codex, or Claude Code against your own OpenAI- or Anthropic-compatible model backend. A local API bridge adapts protocols, while optional access commands prepare a tunnel, proxy, or other connection before the agent starts.
+![Codeport launches your coding agent and translates APIs to reach local or remote models directly, through an SSH tunnel, or through a proxy.](docs/overview.svg)
 
-`codeport` is a Rust executable for Linux and macOS. Coding agents and any access utilities must already be installed and available on `PATH`.
+Run your preferred coding agent against your own model backend. Codeport handles API translation and can start an SSH tunnel or proxy before launching the agent.
+
+Configure your backends once, then choose how to work:
+
+| What you want to do | Command | What Codeport handles |
+| --- | --- | --- |
+| Code with a local model | `codeport opencode --backend local` | Connects the agent to your saved backend and model. |
+| Try another agent on the same model | `codeport codex --backend local` | Adapts supported API requests to the backend's protocol. |
+| Use a model on a remote GPU | `codeport opencode --backend home-gpu` | Starts the configured SSH tunnel or proxy, waits for connectivity, and cleans up on exit. |
+| Try a different model for one session | `codeport opencode --model unsloth/Qwen3.8-27B-GGUF` | Overrides the model for that run without changing your saved default. |
+
+Supported coding agents: **Pi**, **OpenCode**, **Codex**, and **Claude Code**.
+
+`local` and `home-gpu` are example backend names you create in the configuration UI. Agent sessions run in your current directory, with connection settings scoped to the launched process.
 
 ## Quick start
 
-Build with Rust 1.86 or newer:
-
-```sh
-cargo build --locked --release
-./target/release/codeport -cfg
-./target/release/codeport codex
-```
-
-To build and install the executable on your Cargo `PATH`:
+On Linux or macOS, use Rust 1.86 or newer and have your coding agent installed on `PATH`. From this repository:
 
 ```sh
 cargo install --locked --path .
-```
-
-On macOS, if a clean build fails with `linking with cc failed` and an Xcode
-license message, select the standalone Command Line Tools for the build (if
-installed):
-
-```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo build --locked --release
-# Or, to install:
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo install --locked --path .
-```
-
-This selection applies only to that command. To use the full Xcode installation,
-run `sudo xcodebuild -license` to review and accept its license, then retry the
-original build command.
-
-In the configuration UI, add a backend with its API base URL and protocol, then bind an agent to that backend. Credentials and settings are saved after each completed action. The UI displays the configuration file location.
-
-After placing the binary on your `PATH`:
-
-```sh
-codeport pi
-codeport opencode --backend qwen38
-codeport codex --model my-coding-model
-codeport claude -- --continue
 codeport -cfg
-codeport --config ./credential.json -cfg
-codeport --config ./credential.json codex
+codeport opencode
 ```
 
-Use `--` to forward arguments to the installed agent. Agent sessions run in the current directory. Process-specific settings and temporary files connect agents to the local bridge without rewriting their persistent configuration.
+In the configuration UI, add your backend URL, protocol, exact model ID, and credentials, then bind your agent to it. Replace `opencode` with `pi`, `codex`, or `claude` as needed. Ensure Cargo's bin directory (usually `~/.cargo/bin`) is on `PATH`.
 
-The launcher gives interactive agents the foreground terminal and restores it afterward. It owns the agent's process group, forwards externally received termination signals, and terminates remaining tool subprocesses when the session ends.
+Forward agent options after `--`, for example `codeport claude -- --continue`.
 
 ## Configuration and credentials
 
@@ -61,6 +40,11 @@ On both Linux and macOS, the file is:
 ```
 
 `--config PATH` selects an alternate credential file for both configuration UI and launching. Without it, the default path above is used.
+
+```sh
+codeport --config ./credential.json -cfg
+codeport --config ./credential.json opencode
+```
 
 If upgrading from `launchcoder`, copy your existing
 `~/.config/launchcoder/credential.json` to `~/.config/codeport/credential.json`
@@ -138,6 +122,8 @@ If the backend returns `401 Unauthorized`, update its authentication settings in
 the server has loaded that model or allows switching models by request.
 
 ## Backend access
+
+The launcher gives interactive agents the foreground terminal and restores it afterward. It owns the agent's process group, forwards externally received termination signals, and terminates remaining tool subprocesses when the session ends. Any access utilities must already be installed and available on `PATH`.
 
 Set `access` to `null` for direct access, or configure a command:
 

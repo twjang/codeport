@@ -1,3 +1,14 @@
 /target/
 __pycache__/
 *.pyc
+
+# macOS metadata and trash
+.DS_Store
+.AppleDouble/
+.LSOverride
+._*
+.Spotlight-V100/
+.Trashes/
+.Trash/
+.fseventsd/
+.TemporaryItems/
