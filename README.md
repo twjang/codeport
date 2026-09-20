@@ -145,7 +145,15 @@ For cross-protocol launches, the Codex adapter disables its default reasoning an
 
 Translation is not complete API emulation. Opaque reasoning state, multimodal content, built-in hosted tools, and other features without a supported mapping produce explicit errors instead of silently losing data. An agent or backend that requires those features may need a matching protocol or different agent settings.
 
-Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0, Claude Code 2.1.208, Pi 0.85.1, and OpenCode 1.18.31 and 2.0.10. OpenCode 2.0.10 has also completed a live text request against a local Unsloth backend serving `unsloth/Qwen3.8-27B-GGUF`. Live tool use and paid model backends have not been verified. Compatibility with other agent releases or backend implementations still needs verification.
+Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0 and 0.155.1, Claude Code 2.1.208, Pi 0.85.1, and OpenCode 1.18.31 and 2.0.10. OpenCode 2.0.10 has also completed a live text request against a local Unsloth backend serving `unsloth/Qwen3.8-27B-GGUF`. Codex 0.155.1 has also completed a live text request and a shell-tool roundtrip against that backend. Paid model backends have not been verified. Compatibility with other agent releases or backend implementations still needs verification.
+
+For Codex, the bridge translates namespaced function and custom tools to unique
+backend tool names and restores their namespaces in replies. Its model endpoint
+also supplies Codex-compatible metadata for the configured model, using text-only
+input and a conservative 32,768-token context window. This is a compatibility
+default, not detection of the backend's actual limit. Override it when needed,
+for example `codeport codex -- -c model_context_window=65536` if your backend
+supports that context size.
 
 With no explicit model, OpenCode preserves saved selections from its native OpenAI or Anthropic providers. Configure a model override for other provider selections.
 

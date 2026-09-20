@@ -216,3 +216,38 @@ async fn fragmented_sse_is_translated_and_finishes() {
     assert!(!text.contains("event: error"), "{text}");
     mock_task.abort();
 }
+
+#[tokio::test]
+async fn model_catalog_supports_codex_and_openai_clients() {
+    let bridge = Bridge::start(
+        Backend {
+            url: "http://127.0.0.1:1".into(),
+            protocol: Protocol::ChatCompletions,
+            model: None,
+            auth: None,
+            access: None,
+        },
+        Some("local/qwen".into()),
+    )
+    .await
+    .unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/models?client_version=0.155.1", bridge.base_url);
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let catalog: Value = client
+        .get(&url)
+        .bearer_auth(&bridge.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(catalog["data"][0]["id"], "local/qwen");
+    assert_eq!(catalog["models"][0]["slug"], "local/qwen");
+    assert_eq!(catalog["models"][0]["input_modalities"], json!(["text"]));
+    assert!(catalog["models"][0]["experimental_supported_tools"].is_array());
+}

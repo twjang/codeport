@@ -94,7 +94,30 @@ async fn models(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Re
         .iter()
         .map(|m| json!({"id":m,"object":"model","created":0,"owned_by":"codeport"}))
         .collect::<Vec<_>>();
-    Json(json!({"object":"list","data":models})).into_response()
+    // Codex uses its own model catalog envelope; retain the standard OpenAI
+    // list alongside it for clients that consume /v1/models as an OpenAI API.
+    let codex_models: Vec<_> = state.model.iter().map(|model| json!({
+        "slug": model,
+        "display_name": model,
+        "description": "Model configured through codeport",
+        "default_reasoning_level": "none",
+        "supported_reasoning_levels": [],
+        "shell_type": "unified_exec",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "base_instructions": "You are a coding assistant. Follow the user's instructions, inspect relevant files before editing, use available tools when needed, and verify your changes.",
+        "supports_reasoning_summaries": false,
+        "support_verbosity": false,
+        "supports_parallel_tool_calls": true,
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode":"tokens", "limit":10000},
+        "context_window": 32768,
+        "effective_context_window_percent": 95,
+        "input_modalities": ["text"],
+        "experimental_supported_tools": []
+    })).collect();
+    Json(json!({"object":"list","data":models,"models":codex_models})).into_response()
 }
 
 async fn handle(

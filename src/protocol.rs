@@ -4,11 +4,38 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
-pub struct CustomTools(std::collections::BTreeMap<String, bool>, bool);
+pub struct CustomTools(
+    std::collections::BTreeMap<String, bool>,
+    bool,
+    std::collections::BTreeMap<String, (String, String)>,
+);
+
+// Stable, bounded aliases keep namespaces distinct on APIs with flat tool names.
+fn namespaced_name(namespace: &str, name: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in namespace.bytes().chain([0]).chain(name.bytes()) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    let suffix: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(40)
+        .collect();
+    format!("cpns_{hash:016x}_{suffix}")
+}
+
+impl CustomTools {
+    fn restore_namespace(&self, item: &mut Value) {
+        if let Some((namespace, name)) = item["name"].as_str().and_then(|name| self.2.get(name)) {
+            item["namespace"] = json!(namespace);
+            item["name"] = json!(name);
+        }
+    }
+}
 
 const SEARCH_TOOL: &str = "codeport_tool_search";
 
-fn response_tools(request: &Value) -> Result<Vec<Value>> {
+fn raw_response_tools(request: &Value) -> Result<Vec<Value>> {
     let mut tools = request["tools"].as_array().cloned().unwrap_or_default();
     if let Some(items) = request["input"].as_array() {
         for item in items.iter().filter(|i| i["type"] == "tool_search_output") {
@@ -28,8 +55,69 @@ fn response_tools(request: &Value) -> Result<Vec<Value>> {
     Ok(tools)
 }
 
+fn response_tools(request: &Value) -> Result<Vec<Value>> {
+    let mut flattened = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
+    for tool in raw_response_tools(request)? {
+        if tool["type"] == "namespace" {
+            let namespace = tool["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| anyhow!("tool namespace has no name"))?;
+            for nested in arr(&tool, "tools")? {
+                if nested["type"] != "function" && nested["type"] != "custom" {
+                    bail!("unsupported namespaced tool type: {}", nested["type"]);
+                }
+                let name = nested["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| anyhow!("namespaced tool has no name"))?;
+                let alias = namespaced_name(namespace, name);
+                if !names.insert(alias.clone()) {
+                    bail!("duplicate or colliding tool name: {alias}");
+                }
+                let mut nested = nested.clone();
+                nested["name"] = json!(alias);
+                let description = format!(
+                    "{}.{}: {}\n{}",
+                    namespace,
+                    name,
+                    nested["description"].as_str().unwrap_or(""),
+                    tool["description"].as_str().unwrap_or("")
+                );
+                nested["description"] = json!(description);
+                flattened.push(nested);
+            }
+        } else {
+            if let Some(name) = tool["name"].as_str() {
+                if !names.insert(name.to_owned()) {
+                    bail!("duplicate or colliding tool name: {name}");
+                }
+            }
+            flattened.push(tool);
+        }
+    }
+    Ok(flattened)
+}
+
 pub fn custom_tools(request: &Value) -> Result<CustomTools> {
     let mut result = CustomTools::default();
+    for tool in raw_response_tools(request)? {
+        if tool["type"] == "namespace" {
+            let namespace = tool["name"]
+                .as_str()
+                .ok_or_else(|| anyhow!("tool namespace has no name"))?;
+            for nested in arr(&tool, "tools")? {
+                let name = nested["name"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("namespaced tool has no name"))?;
+                result.2.insert(
+                    namespaced_name(namespace, name),
+                    (namespace.to_owned(), name.to_owned()),
+                );
+            }
+        }
+    }
     {
         let tools = response_tools(request)?;
         result.1 = tools
@@ -45,7 +133,12 @@ pub fn custom_tools(request: &Value) -> Result<CustomTools> {
             let grammar = tool["format"]["type"] == "grammar";
             if grammar {
                 let definition = tool["format"]["definition"].as_str().unwrap_or("");
-                if name != "apply_patch"
+                let original_name = result
+                    .2
+                    .get(name)
+                    .map(|(_, name)| name.as_str())
+                    .unwrap_or(name);
+                if original_name != "apply_patch"
                     || tool["format"]["syntax"] != "lark"
                     || !definition.contains("*** Begin Patch")
                     || !definition.contains("*** End Patch")
@@ -352,18 +445,39 @@ fn encode_messages(messages: Vec<Value>, to: Protocol, out: &mut Value) -> Resul
     Ok(())
 }
 
+fn flatten_call_name(item: &mut Value) -> Result<()> {
+    if let Some(namespace) = item["namespace"].as_str().filter(|ns| !ns.is_empty()) {
+        let name = item["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("namespaced call has no name"))?;
+        item["name"] = json!(namespaced_name(namespace, name));
+        item.as_object_mut().unwrap().remove("namespace");
+    }
+    Ok(())
+}
+
 pub fn convert_request(mut v: Value, from: Protocol, to: Protocol) -> Result<Value> {
     if from == to {
         return Ok(v);
-    }
-    if from == Protocol::Responses {
-        v["tools"] = json!(response_tools(&v)?);
     }
     let custom = if from == Protocol::Responses {
         custom_tools(&v)?
     } else {
         CustomTools::default()
     };
+    if from == Protocol::Responses {
+        v["tools"] = json!(response_tools(&v)?);
+        if let Some(items) = v["input"].as_array_mut() {
+            for item in items {
+                if item["type"] == "function_call" || item["type"] == "custom_tool_call" {
+                    flatten_call_name(item)?;
+                }
+            }
+        }
+        if v["tool_choice"].is_object() {
+            flatten_call_name(&mut v["tool_choice"])?;
+        }
+    }
     for key in [
         "previous_response_id",
         "conversation",
@@ -751,6 +865,7 @@ pub fn convert_response_with_tools(
                     item["type"] = json!("custom_tool_call");
                     item["input"] = json!(input);
                 }
+                custom.restore_namespace(item);
             }
         }
     }
@@ -876,7 +991,10 @@ impl StreamConverter {
                 json!({"type":"response.output_item.added","output_index":b.index,"item":if b.tool{if self.custom.1 && b.name==SEARCH_TOOL{json!({"id":format!("fc_{}",b.index),"type":"tool_search_call","call_id":b.id,"execution":"client","arguments":{},"status":"in_progress"})}else if self.custom.0.contains_key(&b.name){json!({"id":format!("fc_{}",b.index),"type":"custom_tool_call","call_id":b.id,"name":b.name,"input":"","status":"in_progress"})}else{json!({"id":format!("fc_{}",b.index),"type":"function_call","call_id":b.id,"name":b.name,"arguments":"","status":"in_progress"})}}else{json!({"id":b.id,"type":"message","role":"assistant","content":[],"status":"in_progress"})}}),
             ),
         };
-        if let Some(v) = v {
+        if let Some(mut v) = v {
+            if self.to == Protocol::Responses && b.tool {
+                self.custom.restore_namespace(&mut v["item"]);
+            }
             out.push(self.emit(v));
         }
         if self.to == Protocol::Responses && !b.tool {
@@ -963,7 +1081,7 @@ impl StreamConverter {
                     events.push(json!({"type":"content_block_stop","index":b.index}))
                 }
                 Protocol::Responses => {
-                    let item = if b.tool && self.custom.1 && b.name == SEARCH_TOOL {
+                    let mut item = if b.tool && self.custom.1 && b.name == SEARCH_TOOL {
                         json!({"id":format!("fc_{}",b.index),"type":"tool_search_call","call_id":b.id,"execution":"client","arguments":parse_args(&json!(b.text))?,"status":"completed"})
                     } else if let Some(patch) = self.custom.0.get(&b.name).filter(|_| b.tool) {
                         let input = custom_input(&b.text, *patch)?;
@@ -979,13 +1097,19 @@ impl StreamConverter {
                         events.push(json!({"type":"response.content_part.done","item_id":b.id,"output_index":b.index,"content_index":0,"part":part}));
                         json!({"id":b.id,"type":"message","role":"assistant","content":[part],"status":"completed"})
                     };
+                    if b.tool {
+                        self.custom.restore_namespace(&mut item);
+                    }
                     events.push(json!({"type":"response.output_item.done","output_index":b.index,"item":item}));
                     items.push(item);
                 }
                 _ => {}
             }
         }
-        for e in events {
+        for mut e in events {
+            if self.to == Protocol::Responses {
+                self.custom.restore_namespace(&mut e);
+            }
             out.push(self.emit(e));
         }
         match self.to {
@@ -1235,6 +1359,132 @@ impl StreamConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn namespaced_tools_preserve_identity_through_replies_and_history() {
+        let request = json!({"input":"read", "tools":[
+            {"type":"namespace", "name":"files", "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]},
+            {"type":"namespace", "name":"other", "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]},
+            {"type":"function","name":"read","parameters":{"type":"object"}}
+        ], "tool_choice":{"type":"function","namespace":"files","name":"read"}});
+        let custom = custom_tools(&request).unwrap();
+        let alias = namespaced_name("files", "read");
+        let converted = convert_request(
+            request.clone(),
+            Protocol::Responses,
+            Protocol::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(converted["tools"][0]["function"]["name"], alias);
+        assert_ne!(
+            converted["tools"][0]["function"]["name"],
+            converted["tools"][1]["function"]["name"]
+        );
+        assert_eq!(converted["tools"][2]["function"]["name"], "read");
+        assert_eq!(converted["tool_choice"]["function"]["name"], alias);
+        assert!(alias.len() <= 64);
+        let response = json!({"id":"reply","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call1","type":"function","function":{"name":alias,"arguments":"{}"}}]},"finish_reason":"tool_calls"}]});
+        let reply = convert_response_with_tools(
+            response,
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            &custom,
+        )
+        .unwrap();
+        assert_eq!(reply["output"][0]["name"], "read");
+        assert_eq!(reply["output"][0]["namespace"], "files");
+        let mut next = request.clone();
+        next["input"] = json!([reply["output"][0], {"type":"function_call_output","call_id":"call1","output":"contents"}]);
+        let history =
+            convert_request(next, Protocol::Responses, Protocol::ChatCompletions).unwrap();
+        assert_eq!(
+            history["messages"][0]["tool_calls"][0]["function"]["name"],
+            alias
+        );
+        assert_eq!(history["messages"][1]["tool_call_id"], "call1");
+        let anthropic =
+            convert_request(request.clone(), Protocol::Responses, Protocol::Anthropic).unwrap();
+        assert_eq!(anthropic["tools"][0]["name"], alias);
+        assert_eq!(anthropic["tool_choice"]["name"], alias);
+        assert_eq!(
+            convert_request(request.clone(), Protocol::Responses, Protocol::Responses).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn namespaced_function_and_custom_streams_restore_names_on_all_items() {
+        for custom_tool in [false, true] {
+            let tool = if custom_tool {
+                json!({"type":"custom","name":"write","format":{"type":"text"}})
+            } else {
+                json!({"type":"function","name":"write","parameters":{"type":"object"}})
+            };
+            let request = json!({"input":"test","tools":[{"type":"namespace","name":"files","tools":[tool]}]});
+            let alias = namespaced_name("files", "write");
+            let arguments = if custom_tool {
+                r#"{"input":"hello"}"#
+            } else {
+                r#"{"text":"hello"}"#
+            };
+            let mut converter =
+                StreamConverter::new(Protocol::ChatCompletions, Protocol::Responses)
+                    .with_custom_tools(custom_tools(&request).unwrap());
+            let mut frames = converter.push("", &json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call1","function":{"name":alias,"arguments":arguments}}]},"finish_reason":"tool_calls"}]}).to_string()).unwrap();
+            frames.extend(converter.push("", "[DONE]").unwrap());
+            let events: Vec<Value> = frames
+                .iter()
+                .filter_map(|frame| {
+                    frame
+                        .lines()
+                        .find_map(|line| line.strip_prefix("data: "))
+                        .map(|data| serde_json::from_str(data).unwrap())
+                })
+                .collect();
+            for kind in ["response.output_item.added", "response.output_item.done"] {
+                let event = events.iter().find(|event| event["type"] == kind).unwrap();
+                assert_eq!(event["item"]["namespace"], "files");
+                assert_eq!(event["item"]["name"], "write");
+            }
+            let item = &events.last().unwrap()["response"]["output"][0];
+            assert_eq!(item["namespace"], "files");
+            assert_eq!(item["name"], "write");
+            if custom_tool {
+                assert_eq!(item["input"], "hello");
+            }
+            let mut next = request;
+            next["input"] = json!([item, {"type":if custom_tool {"custom_tool_call_output"} else {"function_call_output"},"call_id":"call1","output":"done"}]);
+            let history =
+                convert_request(next, Protocol::Responses, Protocol::ChatCompletions).unwrap();
+            assert_eq!(
+                history["messages"][0]["tool_calls"][0]["function"]["name"],
+                alias
+            );
+            assert_eq!(
+                history["messages"][0]["tool_calls"][0]["function"]["arguments"],
+                arguments
+            );
+        }
+    }
+
+    #[test]
+    fn namespaced_tools_reject_collisions_and_unsupported_children() {
+        let alias = namespaced_name("files", "read");
+        let request = json!({"input":"test","tools":[
+            {"type":"namespace","name":"files","tools":[{"type":"function","name":"read"}]},
+            {"type":"function","name":alias}
+        ]});
+        assert!(
+            convert_request(request, Protocol::Responses, Protocol::ChatCompletions)
+                .unwrap_err()
+                .to_string()
+                .contains("colliding")
+        );
+        let invalid = json!({"input":"test","tools":[{"type":"namespace","name":"files","tools":[{"type":"web_search","name":"search"}]}]});
+        assert!(custom_tools(&invalid).is_err());
+        let patch = json!({"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"*** Begin Patch\n*** End Patch"}}]}]});
+        assert!(custom_tools(&patch).unwrap().0[&namespaced_name("functions", "apply_patch")]);
+    }
+
     #[test]
     fn unmapped_semantic_controls_fail_but_operational_metadata_is_allowed() {
         let base = json!({"messages":[{"role":"user","content":"hi"}],"metadata":{"trace":"test"},"client_metadata":{},"store":false,"prompt_cache_key":"session","stream_options":{"include_usage":true}});

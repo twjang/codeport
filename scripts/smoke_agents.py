@@ -90,7 +90,12 @@ class Mock(http.server.BaseHTTPRequestHandler):
                     delta, reason = {"content": ANSWER}, "stop"
                 else:
                     if self.server.agent == "codex":
-                        name, arguments = "exec_command", {"cmd": "printf CODEPORT_TOOL_OK", "max_output_tokens": 50}
+                        names = [t.get("function", {}).get("name", "") for t in body.get("tools", [])]
+                        name = next((n for n in names if n == "exec_command" or (n.startswith("cpns_") and n.endswith("_exec_command"))), None)
+                        if name is None:
+                            self.send_error(400, "Expected a declared exec_command tool")
+                            return
+                        arguments = {"cmd": "printf CODEPORT_TOOL_OK", "max_output_tokens": 50}
                     else:
                         name, arguments = "Read", {"file_path": self.server.fixture if not results else self.server.fixture + ".second"}
                     delta, reason = {"tool_calls": [{"index": 0, "id": f"call_smoke_{len(results)}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}, "tool_calls"
@@ -149,10 +154,10 @@ def run_agent(agent, launcher=None):
                        "--model", "claude-sonnet-4-5", "--output-format", "json"]
         if launcher:
             config_path = Path(directory) / "credential.json"
-            config_path.write_text(json.dumps({"backends": {"smoke": {"url": origin, "protocol": "chat_completions", "auth": {"type": "bearer", "token": TOKEN}}}, "agents": {agent: {"backend": "smoke"}}}))
+            config_path.write_text(json.dumps({"backends": {"smoke": {"url": origin, "protocol": "chat_completions", "model": "codeport-smoke-model", "auth": {"type": "bearer", "token": TOKEN}}}, "agents": {agent: {"backend": "smoke"}}}))
             config_path.chmod(0o600)
             if agent == "codex":
-                forwarded = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--model", "gpt-5.4", "--json"]
+                forwarded = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json"]
             else:
                 forwarded = command[1:] + ["--allowedTools", "Read"]
             command = [str(Path(launcher).resolve()), "--config", str(config_path), agent, "--"] + forwarded
@@ -162,6 +167,8 @@ def run_agent(agent, launcher=None):
         try:
             result = subprocess.run(command, env=env, cwd=directory, text=True, capture_output=True, timeout=45)
             ok = result.returncode == 0 and ANSWER in result.stdout and bool(server.captured) and (not launcher or server.tool_returned)
+            if launcher and agent == "codex":
+                ok = ok and "failed to decode models response" not in result.stderr and "Defaulting to fallback metadata" not in result.stdout
             print(json.dumps({"agent": agent, "pass": ok, "returncode": result.returncode,
                               "tool_roundtrip": server.tool_returned, "requests": server.captured}, indent=2))
             if not ok:
