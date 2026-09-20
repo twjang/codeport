@@ -40,7 +40,7 @@ After placing the binary on your `PATH`:
 
 ```sh
 codeport pi
-codeport opencode --backend home-gpu
+codeport opencode --backend qwen38
 codeport codex --model my-coding-model
 codeport claude -- --continue
 codeport -cfg
