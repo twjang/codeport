@@ -139,15 +139,92 @@ Readiness checks whether the configured host and port accept TCP connections. It
 
 On exit, the cleanup command runs first, with a ten-second timeout. The launcher then terminates its owned persistent access process group, including descendants. Once a preparation command has exited and been reaped, the launcher no longer retains its process-group ID; use the cleanup command to stop any background service it started. Persistent commands should stay in the foreground rather than daemonizing. A cleanup error is reported without replacing the agent's exit status. Cleanup cannot run after an uncatchable process termination such as `SIGKILL`.
 
+## Web search for Claude Code
+
+Claude keeps its default `WebSearch` tool. On Chat Completions and Responses
+backends, Codeport handles the standalone `web_search_20250305` request sent by
+that tool and returns search results in Claude's expected format. No custom tools
+or MCP server are installed. Native Anthropic backends retain their own hosted
+search implementation. File reading, editing, shell commands, and `WebFetch`
+remain Claude Code's built-in tools.
+
+Codeport allows native `WebFetch` for all domains and sets
+`skipWebFetchPreflight=true` for the launched session, so fetching does not depend
+on Anthropic's external domain check. Explicit deny rules and managed policies
+still apply. Websites can still reject requests (for example, HTTP 403), require
+login, or require JavaScript. These settings do not change your saved Claude
+configuration or bypass permissions for other tools.
+
+For example, ask Claude to “search the web for the Rust documentation.” Public
+search through DuckDuckGo Lite is the default and needs no API key. Availability and
+result quality depend on the provider. Bot challenges and unrecognized provider
+pages return explicit errors. Search budgets and domain allow/block
+lists are honored. General hosted-search conversations, dynamic filtering, and
+location options are not supported by this compatibility path.
+
+Queries go only to the selected provider. Model-backend credentials are never
+attached to search requests. Search has a 30-second timeout and a 2 MiB response
+limit. Public-search redirects are checked to reject private/local addresses.
+Search connections do not use the model backend's SSH tunnel or HTTP proxy.
+
+Choose a provider with `codeport -cfg` → **Configure web search**:
+
+- **Public** (default): no setup or API key.
+- **SearXNG**: enter your instance's base URL, including a path prefix if needed. Local/LAN instances and custom ports are supported. Enable `json` in the instance's `search.formats` setting ([SearXNG API docs](https://docs.searxng.org/dev/search_api.html)).
+- **Brave**: enter your Brave Search API key in the hidden prompt. The key is saved in the existing `0600` credential file and sent only to Brave's HTTPS API.
+
+The optional top-level `web_search` field in the credential file selects one of:
+
+```json
+{"provider": "public"}
+```
+
+```json
+{"provider": "searxng", "url": "http://localhost:8080"}
+```
+
+```json
+{"provider": "brave", "api_key": "YOUR_BRAVE_SEARCH_API_KEY"}
+```
+
+For example, add `"web_search": {"provider": "searxng", "url": "http://localhost:8080"}`
+alongside `backends` and `agents`. Omitting it keeps public search. Provider errors
+are reported without silently switching providers. Configured provider endpoints
+do not follow redirects; use the final SearXNG URL. A local SearXNG endpoint is used only for searches explicitly routed to it.
+
 ## Protocol compatibility
 
 The bridge accepts OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages. Same-protocol requests are forwarded to preserve native features. Cross-protocol translation targets text conversations, streamed responses, function/tool calls, and tool results used in repeated agent turns.
 
-For cross-protocol launches, the Codex adapter disables its default reasoning and hosted web-search features, and the Claude Code adapter disables thinking; the launcher announces these compatibility settings. Same-protocol launches retain native behavior.
+For cross-protocol launches, the Codex adapter disables its default reasoning and hosted web-search features, and the Claude Code adapter disables thinking and explicit effort (`CLAUDE_CODE_EFFORT_LEVEL=auto`); the launcher announces these compatibility settings. Same-protocol launches retain native behavior.
+
+When translating Anthropic requests with thinking omitted or disabled, Codeport
+explicitly disables upstream reasoning too, so a local model's default thinking
+mode does not produce reasoning content the bridge cannot preserve.
+
+Claude Code auto mode is supported when translating to Chat Completions or
+Responses. When Claude requests `dangerous_tool_use` safeguards, Codeport sends a
+separate review to the configured backend and model, without tools, using the
+conversation, permission context, and proposed tool calls. Native `WebFetch` and
+`WebSearch` calls are automatically allowed by Codeport's classifier without an
+extra model request. Other tools in the same response still require review; a
+failed review blocks those tools while preserving the web-tool approvals. It returns each verdict
+to Claude before completing the response. Denied actions stay blocked; timeouts,
+failed reviews, and malformed or incomplete verdicts also block execution. Native
+Anthropic backends receive the safeguards request unchanged.
+
+```sh
+codeport claude -- --permission-mode auto
+```
+
+Review adds an inference request for each response containing tool calls. Its
+judgment depends on the configured model; this is Codeport's reviewer, not
+Anthropic's trained classifier. Review requests have a 60-second timeout and a
+1 MiB input limit; authorization context is never silently truncated.
 
 Translation is not complete API emulation. Opaque reasoning state, multimodal content, built-in hosted tools, and other features without a supported mapping produce explicit errors instead of silently losing data. An agent or backend that requires those features may need a matching protocol or different agent settings.
 
-Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0 and 0.155.1, Claude Code 2.1.208, Pi 0.85.1, and OpenCode 1.18.31 and 2.0.10. OpenCode 2.0.10 has also completed a live text request against a local Unsloth backend serving `unsloth/Qwen3.8-27B-GGUF`. Codex 0.155.1 has also completed a live text request and a shell-tool roundtrip against that backend. Paid model backends have not been verified. Compatibility with other agent releases or backend implementations still needs verification.
+Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0 and 0.155.1, Claude Code 2.1.208 and 2.1.278, Pi 0.85.1, and OpenCode 1.18.31 and 2.0.10. OpenCode 2.0.10 has also completed a live text request against a local Unsloth backend serving `unsloth/Qwen3.8-27B-GGUF`. Codex 0.155.1 has also completed a live text request and a shell-tool roundtrip against that backend. Claude Code 2.1.278 has completed live text, Read-tool, and auto-mode Bash arithmetic checks against the same backend. Paid model backends have not been verified. Compatibility with other agent releases or backend implementations still needs verification.
 
 For Codex, the bridge translates namespaced function and custom tools to unique
 backend tool names and restores their namespaces in replies. Its model endpoint
