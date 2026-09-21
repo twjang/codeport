@@ -13,7 +13,9 @@ Configure your backends once, then choose how to work:
 | Use a model on a remote GPU | `codeport opencode --backend home-gpu` | Starts the configured SSH tunnel or proxy, waits for connectivity, and cleans up on exit. |
 | Try a different model for one session | `codeport opencode --model unsloth/Qwen3.8-27B-GGUF` | Overrides the model for that run without changing your saved default. |
 
-Supported coding agents: **Pi**, **OpenCode**, **Codex**, and **Claude Code**.
+Supported coding agents: **Pi**, **OpenCode**, **Codex (experimental)**, and **Claude Code (experimental)**.
+
+Codex and Claude Code integrations are still under development; some tools and workflows may fail.
 
 `local` and `home-gpu` are example backend names you create in the configuration UI. Agent sessions run in your current directory, with connection settings scoped to the launched process.
 
