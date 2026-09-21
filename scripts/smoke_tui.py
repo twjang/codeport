@@ -61,6 +61,9 @@ def main():
             send()
             expect("Backend access")
             send()
+            expect("Do you want to test the connection?")
+            # This configuration smoke test does not run a backend server.
+            send(b"n")
             expect("Saved to")
             expect("Add backend")
             send(b"\x1b[B" * 3 + b"\r")
