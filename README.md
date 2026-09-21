@@ -53,9 +53,15 @@ codeport claude -- --continue
 
 ## Configuration
 
-Run `codeport -cfg` to edit backends, agent defaults, credentials, and web-search settings.
+Run `codeport -cfg` to edit backends, agent defaults, credentials, and web-search settings. After adding or editing a backend, you can test the connection before it is saved. The test starts any configured access command, requests the authenticated model list, displays available models, and cleans up the access session. It does not generate a completion. A failed test reports the error but still saves your settings so you can edit them later.
 
-A model supplied with `--model` overrides the agent's saved model, which overrides the backend's default. Leave both model fields blank in the UI to keep the agent's own selection. For OpenCode, set a model explicitly unless you use its native OpenAI or Anthropic provider.
+A model supplied with `--model` overrides the agent's saved model, which overrides the backend's default.
+
+Leave both model fields blank to discover models from the backend's OpenAI-compatible `GET /v1/models` endpoint. All agents initially select the first model returned by the backend. This discovered default does not pin requests to that model. OpenCode and Pi also register the returned models in their session catalogs for model selection.
+
+The bridge also exposes the discovered catalog to clients that request it. Discovery runs after backend access is established, uses the backend's credentials, and caches the list for the session. Restart Codeport to refresh it.
+
+If discovery fails or returns no models, Codeport reports an error before launching the agent; set `--model MODEL` for servers without a model-list endpoint.
 
 Using a local model through Codeport leaves your ordinary Codex model default unchanged. Your existing Codex sessions and skills remain accessible, but model and settings changes made inside a Codeport-launched Codex session are discarded on exit. To change your usual Codex defaults, launch Codex directly.
 

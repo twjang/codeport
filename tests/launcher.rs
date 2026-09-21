@@ -27,7 +27,7 @@ fn fixture(
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let config = directory.path().join("credential.json");
     fs::write(&config, serde_json::to_vec(&json!({
-        "backends":{"test":{"url":format!("http://{}/v1", listener.local_addr().unwrap()),"protocol":"responses","access":{
+        "backends":{"test":{"url":format!("http://{}/v1", listener.local_addr().unwrap()),"protocol":"responses","model":"fixture-model","access":{
             "command":access_script,"persistent":persistent,"timeout_secs":5,
             "cleanup":format!("printf cleaned > {}",quote(&directory.path().join("cleanup")))
         }}},"agents":{"codex":{"backend":"test"}}
@@ -282,4 +282,76 @@ fn interactive_agent_can_read_foreground_terminal() {
         "{}",
         String::from_utf8_lossy(&output)
     );
+}
+
+#[tokio::test]
+async fn all_agents_launch_with_discovered_default_model() {
+    use axum::{routing::get, Json, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/models",
+        get(|| async { Json(json!({"data":[{"id":"local/first"},{"id":"local/second"}]})) }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for agent_name in ["opencode", "pi", "codex", "claude"] {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = directory.path().join(agent_name);
+        let script = if agent_name == "opencode" {
+            "#!/bin/sh\nif [ \"$1\" = '--help' ]; then exit 0; fi\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\"\n"
+        } else {
+            "#!/bin/sh\nprintf '%s\\n' \"$@\"\n"
+        };
+        fs::write(&agent, script).unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = directory.path().join("credential.json");
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "backends":{"test":{"url":url,"protocol":"chat_completions"}},
+                "agents":{(agent_name):{"backend":"test"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codeport"));
+        command
+            .arg("--config")
+            .arg(config)
+            .arg(agent_name)
+            .env("CODEX_HOME", directory.path().join("codex-home"))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    directory.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{agent_name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if agent_name == "opencode" {
+            let config: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(config["model"], "codeport/local/first");
+            assert_eq!(
+                config["provider"]["codeport"]["models"]["local/second"]["name"],
+                "local/second"
+            );
+        } else {
+            let output = String::from_utf8(output.stdout).unwrap();
+            let args: Vec<_> = output.lines().collect();
+            assert!(
+                args.windows(2)
+                    .any(|args| args == ["--model", "local/first"]),
+                "{agent_name}: {output}"
+            );
+        }
+    }
+    server.abort();
 }

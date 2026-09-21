@@ -528,6 +528,7 @@ async fn classifier_allows_web_tools_without_reviewing_them() {
         .with_state(requests.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let state = BridgeState {
+        catalog: tokio::sync::OnceCell::new(),
         backend: Backend {
             url,
             protocol: Protocol::ChatCompletions,
@@ -573,4 +574,158 @@ async fn classifier_allows_web_tools_without_reviewing_them() {
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
     task.abort();
+}
+
+#[tokio::test]
+async fn discovers_backend_models_with_auth_and_preserves_selection() {
+    for (base_path, auth, expected_auth) in [
+        ("", None, None),
+        (
+            "/prefix/v1/",
+            Some(Auth::Bearer {
+                token: "upstream-secret".into(),
+            }),
+            Some("Bearer upstream-secret"),
+        ),
+        (
+            "/prefix/v1/chat/completions",
+            Some(Auth::Basic {
+                username: "user".into(),
+                password: "pass".into(),
+            }),
+            Some("Basic dXNlcjpwYXNz"),
+        ),
+    ] {
+        let requests: Requests = Arc::default();
+        let captured = requests.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let prefix = if base_path.is_empty() {
+            "/v1"
+        } else {
+            "/prefix/v1"
+        };
+        let app = Router::new()
+            .route(
+                &format!("{prefix}/models"),
+                get(move |headers: HeaderMap| async move {
+                    captured.lock().unwrap().push((headers, Value::Null));
+                    Json(json!({"object":"list","data":[
+                        {"id":"local/first","object":"model","max_model_len":8192},
+                        {"id":"local/second","object":"model"},
+                        {"id":"local/first"}
+                    ]}))
+                }),
+            )
+            .route(&format!("{prefix}/chat/completions"), post(mock))
+            .with_state((requests.clone(), json!({"choices":[]})));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let bridge = Bridge::start(
+            Backend {
+                url: format!("{origin}{base_path}"),
+                protocol: Protocol::ChatCompletions,
+                model: None,
+                auth,
+                access: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client
+                .get(format!("{}/models", bridge.base_url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            bridge.model_ids().await.unwrap(),
+            ["local/first", "local/second"]
+        );
+        for path in ["/v1/models", "/models"] {
+            let list: Value = client
+                .get(format!("{}{path}", bridge.base_url))
+                .bearer_auth(&bridge.token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(list["data"].as_array().unwrap().len(), 2);
+            assert_eq!(list["data"][0]["max_model_len"], 8192);
+            assert_eq!(list["models"][1]["slug"], "local/second");
+        }
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "catalog should be cached"
+        );
+        let response = client
+            .post(format!("{}/v1/chat/completions", bridge.base_url))
+            .bearer_auth(&bridge.token)
+            .json(&json!({"model":"local/second","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured[1].1["model"], "local/second",
+            "discovery must not pin the first model"
+        );
+        for (headers, _) in captured.iter() {
+            assert_eq!(
+                headers.get("authorization").map(|h| h.to_str().unwrap()),
+                expected_auth
+            );
+        }
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn discovery_reports_invalid_empty_and_failed_catalogs() {
+    for (status, body) in [
+        (StatusCode::OK, r#"{"data":[]}"#),
+        (StatusCode::OK, r#"{"models":[]}"#),
+        (StatusCode::OK, r#"{"data":[{"id":" "}]}"#),
+        (StatusCode::OK, r#"{"data":[{"id":123}]}"#),
+        (StatusCode::OK, "invalid JSON"),
+        (StatusCode::UNAUTHORIZED, "private error details"),
+        (StatusCode::NOT_FOUND, "private error details"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/v1/models", get(move || async move { (status, body) }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let bridge = Bridge::start(
+            Backend {
+                url,
+                protocol: Protocol::ChatCompletions,
+                model: None,
+                auth: None,
+                access: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let response = reqwest::Client::new()
+            .get(format!("{}/v1/models", bridge.base_url))
+            .bearer_auth(&bridge.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let text = response.text().await.unwrap();
+        assert!(text.contains("--model MODEL"), "{text}");
+        assert!(!text.contains("private error details"));
+        task.abort();
+    }
 }

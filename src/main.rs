@@ -59,7 +59,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     if cli.cfg {
-        tui::run(cli.config.as_deref())?;
+        tui::run(cli.config.as_deref()).await?;
         return Ok(0);
     }
     let agent = cli
@@ -135,6 +135,16 @@ async fn launch(
     }
     let upstream_protocol = backend.protocol;
     let bridge = bridge::Bridge::start_with_search(backend, model.clone(), search).await?;
+    let discovered_models = if model.is_none() {
+        tokio::select! {
+            result = bridge.model_ids() => result?,
+            error = access.wait_for_failure() => bail!("{error}"),
+            _ = terminate.recv() => return Ok(143),
+            _ = interrupt.recv() => return Ok(130),
+        }
+    } else {
+        Vec::new()
+    };
     let args = if agent == "opencode" {
         agents::opencode_args(args).await?
     } else {
@@ -147,6 +157,7 @@ async fn launch(
         model.as_deref(),
         &args,
         upstream_protocol,
+        &discovered_models,
     )?;
     let mut child =
         agent_process::AgentProcess::spawn(launch.take_command()).with_context(|| {

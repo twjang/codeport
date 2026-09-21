@@ -4,7 +4,7 @@ use crate::config::{
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 
-pub fn run(alternate_path: Option<&std::path::Path>) -> Result<()> {
+pub async fn run(alternate_path: Option<&std::path::Path>) -> Result<()> {
     let path = match alternate_path {
         Some(path) => path.to_owned(),
         None => config_path()?,
@@ -50,13 +50,13 @@ pub fn run(alternate_path: Option<&std::path::Path>) -> Result<()> {
                     .interact_text()?;
                 updated
                     .backends
-                    .insert(name.trim().to_string(), edit_backend(None)?);
+                    .insert(name.trim().to_string(), edit_backend(None).await?);
             }
             Some(1) => {
                 let Some(name) = select_backend(&config)? else {
                     continue;
                 };
-                let backend = edit_backend(config.backends.get(&name))?;
+                let backend = edit_backend(config.backends.get(&name)).await?;
                 updated.backends.insert(name, backend);
             }
             Some(2) => {
@@ -105,7 +105,7 @@ pub fn run(alternate_path: Option<&std::path::Path>) -> Result<()> {
                     .get(agents[index])
                     .and_then(|b| b.model.as_deref());
                 let model = optional_input(
-                    "Model override (empty: use backend default or agent selection)",
+                    "Model override (empty: use backend default / discover models)",
                     existing,
                 )?;
                 updated
@@ -158,7 +158,7 @@ fn optional_input(prompt: &str, existing: Option<&str>) -> Result<Option<String>
     Ok((!value.trim().is_empty()).then(|| value.trim().to_string()))
 }
 
-fn edit_backend(existing: Option<&Backend>) -> Result<Backend> {
+async fn edit_backend(existing: Option<&Backend>) -> Result<Backend> {
     let theme = ColorfulTheme::default();
     let url: String = Input::with_theme(&theme)
         .with_prompt("Backend base URL (include /v1 if required)")
@@ -203,7 +203,7 @@ fn edit_backend(existing: Option<&Backend>) -> Result<Backend> {
         .default(default)
         .interact()?];
     let model = optional_input(
-        "Default model (empty: preserve agent selection)",
+        "Default model (empty: discover models)",
         existing.and_then(|b| b.model.as_deref()),
     )?;
     let auth = edit_auth(existing.and_then(|b| b.auth.as_ref()))?;
@@ -261,13 +261,63 @@ fn edit_backend(existing: Option<&Backend>) -> Result<Backend> {
             })
         }
     };
-    Ok(Backend {
+    let backend = Backend {
         url,
         protocol,
         model,
         auth,
         access,
-    })
+    };
+    if Confirm::with_theme(&theme)
+        .with_prompt("Do you want to test the connection?")
+        .default(true)
+        .interact()?
+    {
+        println!("Testing connection and model discovery...");
+        match test_connection(&backend).await {
+            Ok(models) => {
+                println!("Connection successful. Available models:");
+                for model in &models {
+                    println!("  {model}");
+                }
+                if let Some(model) = &backend.model {
+                    if !models.contains(model) {
+                        println!("Warning: configured model {model:?} is not in the backend's model list.");
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("Connection test failed: {error:#}");
+                println!("Settings will still be saved. You can edit the backend to correct them.");
+            }
+        }
+        println!();
+    }
+    Ok(backend)
+}
+
+// Use the same access lifecycle and authenticated discovery as an agent launch.
+// Passing no override ensures even an explicitly configured model is tested remotely.
+async fn test_connection(backend: &Backend) -> Result<Vec<String>> {
+    let mut access = crate::access::AccessSession::new(backend.access.clone());
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let result = tokio::select! {
+        result = async {
+            access.start(&backend.url).await?;
+            let bridge = crate::bridge::Bridge::start_with_search(
+                backend.clone(), None, SearchProvider::default(),
+            ).await?;
+            tokio::select! {
+                result = bridge.model_ids() => result,
+                error = access.wait_for_failure() => anyhow::bail!("{error}"),
+            }
+        } => result,
+        _ = interrupt.recv() => Err(anyhow::anyhow!("connection test interrupted")),
+        _ = terminate.recv() => Err(anyhow::anyhow!("connection test terminated")),
+    };
+    access.cleanup().await;
+    result
 }
 
 fn edit_auth(existing: Option<&Auth>) -> Result<Option<Auth>> {
@@ -402,7 +452,7 @@ fn show(config: &Config) {
                 .model
                 .as_deref()
                 .filter(|m| !m.is_empty())
-                .unwrap_or("agent selection")
+                .unwrap_or("discover models")
         );
     }
     for (agent, binding) in &config.agents {
@@ -413,8 +463,73 @@ fn show(config: &Config) {
                 .model
                 .as_deref()
                 .filter(|m| !m.is_empty())
-                .unwrap_or("backend default / agent selection")
+                .unwrap_or("backend default / discovery")
         );
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        http::{HeaderMap, StatusCode},
+        routing::get,
+        Json, Router,
+    };
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn connection_test_checks_remote_auth_and_cleans_up_on_success_and_failure() {
+        for status in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
+            let called = Arc::new(AtomicBool::new(false));
+            let observed = called.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let app = Router::new().route(
+                "/v1/models",
+                get(move |headers: HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer backend-secret");
+                    observed.store(true, Ordering::SeqCst);
+                    (status, Json(json!({"data":[{"id":"remote/model"}]})))
+                }),
+            );
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("cleaned");
+            let backend = Backend {
+                url,
+                protocol: Protocol::ChatCompletions,
+                model: Some("configured/model".into()),
+                auth: Some(Auth::Bearer {
+                    token: "backend-secret".into(),
+                }),
+                access: Some(Access {
+                    command: "true".into(),
+                    persistent: false,
+                    timeout_secs: 2,
+                    cleanup: Some(format!("touch '{}'", marker.display())),
+                }),
+            };
+            let result = test_connection(&backend).await;
+            if status.is_success() {
+                assert_eq!(result.unwrap(), ["remote/model"]);
+            } else {
+                assert!(format!("{:#}", result.unwrap_err()).contains("401"));
+            }
+            assert!(
+                called.load(Ordering::SeqCst),
+                "explicit models must still contact the backend"
+            );
+            assert!(
+                marker.exists(),
+                "cleanup must run even when authentication fails"
+            );
+            task.abort();
+        }
+    }
 }

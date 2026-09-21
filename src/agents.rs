@@ -126,11 +126,18 @@ pub fn prepare(
     model: Option<&str>,
     args: &[String],
     upstream_protocol: Protocol,
+    discovered_models: &[String],
 ) -> Result<AgentLaunch> {
     protocol(agent)?;
     let base = base_url.trim_end_matches('/');
     let api = format!("{base}/v1");
     let model = model.filter(|m| !m.trim().is_empty());
+    let model_ids: Vec<&str> = if let Some(model) = model {
+        vec![model]
+    } else {
+        discovered_models.iter().map(String::as_str).collect()
+    };
+    let selected_model = model.or_else(|| model_ids.first().copied());
     let mut command = Command::new(if agent == "claude-code" {
         "claude"
     } else {
@@ -173,7 +180,7 @@ pub fn prepare(
             ] {
                 command.args(["-c", &setting]);
             }
-            if let Some(model) = model {
+            if let Some(model) = selected_model {
                 command.args(["--model", model]);
             }
         }
@@ -203,9 +210,9 @@ pub fn prepare(
                 .env_remove("CLAUDE_CODE_USE_BEDROCK")
                 .env_remove("CLAUDE_CODE_USE_VERTEX")
                 .env_remove("CLAUDE_CODE_USE_FOUNDRY");
-            if let Some(model) = model {
+            if let Some(model) = selected_model {
                 command.args(["--model", model]);
-                // Auxiliary requests should use the explicit backend model as well.
+                // Auxiliary requests should use the selected backend model as well.
                 for key in [
                     "ANTHROPIC_MODEL",
                     "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -218,7 +225,7 @@ pub fn prepare(
             }
         }
         "opencode" => {
-            let config = opencode_config(&api, token, model);
+            let config = opencode_config(&api, token, selected_model, &model_ids);
             command.env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?);
         }
         "pi" => {
@@ -227,11 +234,11 @@ pub fn prepare(
                 .suffix(".ts")
                 .tempfile()
                 .context("Creating temporary Pi provider extension")?;
-            let script = pi_extension(base, &api, token, model);
+            let script = pi_extension(base, &api, token, &model_ids);
             file.write_all(script.as_bytes())?;
             file.flush()?;
             command.arg("--extension").arg(file.path());
-            if let Some(model) = model {
+            if let Some(model) = selected_model {
                 command.args(["--provider", "codeport", "--model", model]);
             }
             extension = Some(file);
@@ -246,7 +253,7 @@ pub fn prepare(
     })
 }
 
-fn opencode_config(api: &str, token: &str, model: Option<&str>) -> Value {
+fn opencode_config(api: &str, token: &str, model: Option<&str>, model_ids: &[&str]) -> Value {
     if let Some(model) = model {
         json!({
             "$schema":"https://opencode.ai/config.json",
@@ -256,7 +263,7 @@ fn opencode_config(api: &str, token: &str, model: Option<&str>) -> Value {
             "provider":{"codeport":{
                 "npm":"@ai-sdk/openai-compatible", "name":"codeport",
                 "options":{"baseURL":api,"apiKey":token},
-                "models":{(model):{"name":model,"tool_call":true}}
+                "models":model_ids.iter().map(|id| ((*id).to_owned(), json!({"name":id,"tool_call":true}))).collect::<serde_json::Map<String, Value>>()
             }}
         })
     } else {
@@ -273,19 +280,19 @@ fn opencode_config(api: &str, token: &str, model: Option<&str>) -> Value {
     }
 }
 
-fn pi_extension(base: &str, api: &str, token: &str, model: Option<&str>) -> String {
+fn pi_extension(base: &str, api: &str, token: &str, model_ids: &[&str]) -> String {
     let headers = json!({"Authorization":format!("Bearer {token}")});
     let mut script = format!(
         "export default function(pi) {{\n  pi.registerProvider('openai', {});\n  pi.registerProvider('anthropic', {});\n",
         json!({"baseUrl":api,"apiKey":token,"headers":headers}),
         json!({"baseUrl":base,"apiKey":token,"headers":headers}),
     );
-    if let Some(model) = model {
+    if !model_ids.is_empty() {
         let provider = json!({
             "baseUrl":api,"apiKey":token,"headers":headers,"api":"openai-completions",
-            "models":[{"id":model,"name":model,"reasoning":false,"input":["text"],
+            "models":model_ids.iter().map(|model| json!({"id":model,"name":model,"reasoning":false,"input":["text"],
                 "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-                "contextWindow":128000,"maxTokens":16384}]
+                "contextWindow":128000,"maxTokens":16384})).collect::<Vec<_>>()
         });
         script.push_str(&format!("  pi.registerProvider('codeport', {provider});\n"));
     }
@@ -406,6 +413,7 @@ mod tests {
                 Some(""),
                 &[],
                 Protocol::Responses,
+                &[],
             )
             .unwrap();
             assert!(!launch.command.get_args().any(|a| a == "--model"));
@@ -426,6 +434,7 @@ mod tests {
             Some("model with spaces"),
             &["exec".into(), "$(no shell)".into()],
             Protocol::Responses,
+            &[],
         )
         .unwrap();
         let args: Vec<_> = launch
@@ -449,6 +458,7 @@ mod tests {
             Some("local/model"),
             &[],
             Protocol::Responses,
+            &[],
         )
         .unwrap();
         let path = launch._extension.as_ref().unwrap().path().to_owned();
@@ -467,6 +477,7 @@ mod tests {
             None,
             &[],
             Protocol::Responses,
+            &[],
         )
         .unwrap();
         let path = launch._extension.as_ref().unwrap().path().to_owned();
@@ -488,6 +499,7 @@ mod tests {
             None,
             &[],
             Protocol::Responses,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -517,6 +529,7 @@ mod tests {
                 None,
                 &[],
                 protocol,
+                &[],
             )
             .unwrap();
             let args: Vec<_> = launch
@@ -541,8 +554,109 @@ mod tests {
     }
 
     #[test]
+    fn discovered_models_are_registered_in_agent_catalogs() {
+        let models = vec!["local/first".to_owned(), "local/second".to_owned()];
+        for agent in ["opencode", "pi"] {
+            let launch = prepare(
+                agent,
+                "http://localhost",
+                "local-token",
+                None,
+                &[],
+                Protocol::ChatCompletions,
+                &models,
+            )
+            .unwrap();
+            if agent == "opencode" {
+                let config: Value =
+                    serde_json::from_str(&env(&launch.command, "OPENCODE_CONFIG_CONTENT").unwrap())
+                        .unwrap();
+                assert_eq!(config["enabled_providers"], json!(["codeport"]));
+                assert_eq!(config["model"], "codeport/local/first");
+                assert_eq!(config["small_model"], "codeport/local/first");
+                assert_eq!(
+                    config["provider"]["codeport"]["models"]
+                        .as_object()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert_eq!(
+                    config["provider"]["codeport"]["models"]["local/second"]["name"],
+                    "local/second"
+                );
+            } else {
+                let script =
+                    std::fs::read_to_string(launch._extension.as_ref().unwrap().path()).unwrap();
+                let provider = script
+                    .lines()
+                    .find(|line| line.contains("registerProvider('codeport'"))
+                    .unwrap();
+                let provider: Value = serde_json::from_str(
+                    provider
+                        .trim()
+                        .strip_prefix("pi.registerProvider('codeport', ")
+                        .unwrap()
+                        .strip_suffix(");")
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(provider["models"][1]["id"], "local/second");
+                let args: Vec<_> = launch.command.get_args().collect();
+                assert!(args.windows(2).any(|a| a == ["--model", "local/first"]));
+            }
+        }
+    }
+
+    #[test]
+    fn all_agents_prefer_explicit_models_over_discovered_defaults() {
+        let models = vec!["local/first".to_owned(), "local/second".to_owned()];
+        for agent in ["opencode", "pi", "codex", "claude"] {
+            for explicit in [None, Some("local/override")] {
+                let expected = explicit.unwrap_or("local/first");
+                let launch = prepare(
+                    agent,
+                    "http://localhost",
+                    "token",
+                    explicit,
+                    &[],
+                    Protocol::ChatCompletions,
+                    &models,
+                )
+                .unwrap();
+                if agent == "opencode" {
+                    let config: Value = serde_json::from_str(
+                        &env(&launch.command, "OPENCODE_CONFIG_CONTENT").unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(config["model"], format!("codeport/{expected}"));
+                } else {
+                    let args: Vec<_> = launch.command.get_args().collect();
+                    assert!(args.windows(2).any(|a| a == ["--model", expected]));
+                }
+                if agent == "claude" {
+                    for key in [
+                        "ANTHROPIC_MODEL",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                        "CLAUDE_CODE_SUBAGENT_MODEL",
+                    ] {
+                        assert_eq!(env(&launch.command, key).as_deref(), Some(expected));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn opencode_registers_custom_model() {
-        let config = opencode_config("http://localhost/v1", "token", Some("local/model"));
+        let config = opencode_config(
+            "http://localhost/v1",
+            "token",
+            Some("local/model"),
+            &["local/model"],
+        );
         assert_eq!(config["model"], "codeport/local/model");
         assert_eq!(
             config["provider"]["codeport"]["models"]["local/model"]["tool_call"],
@@ -558,6 +672,7 @@ mod tests {
             None,
             &[],
             Protocol::Responses,
+            &[],
         )
         .unwrap();
         let converted = prepare(
@@ -567,6 +682,7 @@ mod tests {
             None,
             &[],
             Protocol::ChatCompletions,
+            &[],
         )
         .unwrap();
         assert!(!native
@@ -584,6 +700,7 @@ mod tests {
             None,
             &[],
             Protocol::Anthropic,
+            &[],
         )
         .unwrap();
         let converted = prepare(
@@ -593,6 +710,7 @@ mod tests {
             None,
             &[],
             Protocol::ChatCompletions,
+            &[],
         )
         .unwrap();
         assert!(env(&native.command, "MAX_THINKING_TOKENS").is_none());
@@ -615,7 +733,8 @@ mod tests {
             "t",
             None,
             &[],
-            Protocol::Responses
+            Protocol::Responses,
+            &[],
         )
         .is_err());
     }

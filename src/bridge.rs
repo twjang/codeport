@@ -3,7 +3,7 @@ use crate::{
     config::{Auth, Backend, Protocol, SearchProvider},
     protocol,
 };
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, State},
@@ -25,6 +25,7 @@ pub struct Bridge {
     pub base_url: String,
     pub token: String,
     task: tokio::task::JoinHandle<()>,
+    state: Arc<BridgeState>,
 }
 
 #[derive(Clone)]
@@ -34,9 +35,18 @@ struct BridgeState {
     model: Option<String>,
     token: String,
     client: reqwest::Client,
+    catalog: tokio::sync::OnceCell<Vec<Value>>,
 }
 
 impl Bridge {
+    pub async fn model_ids(&self) -> Result<Vec<String>> {
+        Ok(catalog(&self.state)
+            .await?
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect())
+    }
+
     #[cfg(test)]
     pub async fn start(backend: Backend, model: Option<String>) -> Result<Self> {
         Self::start_with_search(backend, model, SearchProvider::default()).await
@@ -52,6 +62,7 @@ impl Bridge {
         let base_url = format!("http://{}", listener.local_addr()?);
         let token = uuid::Uuid::new_v4().to_string();
         let state = Arc::new(BridgeState {
+            catalog: tokio::sync::OnceCell::new(),
             backend,
             search,
             model,
@@ -69,8 +80,9 @@ impl Bridge {
             .route("/v1/messages", post(handle))
             .route("/messages", post(handle))
             .route("/v1/models", get(models))
+            .route("/models", get(models))
             .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-            .with_state(state);
+            .with_state(state.clone());
         let task = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
                 eprintln!("codeport: local API bridge stopped: {error}");
@@ -80,6 +92,7 @@ impl Bridge {
             base_url,
             token,
             task,
+            state,
         })
     }
 }
@@ -98,18 +111,89 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
         || headers.get("x-api-key").and_then(|h| h.to_str().ok()) == Some(token)
 }
 
+// Share one backend catalog snapshot between agent configuration and the bridge.
+async fn catalog(state: &BridgeState) -> Result<&Vec<Value>> {
+    state
+        .catalog
+        .get_or_try_init(|| async {
+            if let Some(model) = &state.model {
+                return Ok(vec![
+                    json!({"id":model,"object":"model","created":0,"owned_by":"codeport"}),
+                ]);
+            }
+            let mut url = endpoint(&state.backend.url, state.backend.protocol)?;
+            let path = url.path().to_owned();
+            let suffix = match state.backend.protocol {
+                Protocol::ChatCompletions => "chat/completions",
+                Protocol::Responses => "responses",
+                Protocol::Anthropic => "messages",
+            };
+            url.set_path(&format!(
+                "{}models",
+                path.strip_suffix(suffix)
+                    .context("invalid backend endpoint")?
+            ));
+            let mut request = state.client.get(url).timeout(Duration::from_secs(15));
+            if state.backend.protocol == Protocol::Anthropic {
+                request = request.header("anthropic-version", "2023-06-01");
+            }
+            request = match &state.backend.auth {
+                Some(Auth::Bearer { token }) => request.bearer_auth(token),
+                Some(Auth::Basic { username, password }) => {
+                    request.basic_auth(username, Some(password))
+                }
+                None => request,
+            };
+            // Do not include upstream response bodies or URLs, which can contain secrets.
+            let response = request
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("could not reach backend model endpoint"))?;
+            if !response.status().is_success() {
+                bail!("backend model endpoint returned HTTP {}", response.status());
+            }
+            let response: Value = response
+                .json()
+                .await
+                .map_err(|_| anyhow::anyhow!("invalid JSON from backend model endpoint"))?;
+            let entries = response["data"]
+                .as_array()
+                .context("backend model endpoint must return a data array")?;
+            let mut seen = std::collections::HashSet::new();
+            let mut models = Vec::new();
+            for entry in entries {
+                let id = entry["id"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty())
+                    .context("backend model catalog contains a missing or empty model ID")?;
+                if seen.insert(id.to_owned()) {
+                    models.push(entry.clone());
+                }
+            }
+            if models.is_empty() {
+                bail!("backend model endpoint returned no models");
+            }
+            Ok(models)
+        })
+        .await
+        .context(
+            "model discovery failed; check the backend /v1/models endpoint or set --model MODEL",
+        )
+}
+
 async fn models(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Response {
     if !authorized(&headers, &state.token) {
         return error(StatusCode::UNAUTHORIZED, "invalid local bridge credential");
     }
-    let models = state
-        .model
-        .iter()
-        .map(|m| json!({"id":m,"object":"model","created":0,"owned_by":"codeport"}))
-        .collect::<Vec<_>>();
+    let models = match catalog(&state).await {
+        Ok(models) => models,
+        Err(err) => return error(StatusCode::BAD_GATEWAY, &format!("{err:#}")),
+    };
     // Codex uses its own model catalog envelope; retain the standard OpenAI
     // list alongside it for clients that consume /v1/models as an OpenAI API.
-    let codex_models: Vec<_> = state.model.iter().map(|model| json!({
+    let codex_models: Vec<_> = models.iter().map(|entry| {
+        let model = &entry["id"];
+        json!({
         "slug": model,
         "display_name": model,
         "description": "Model configured through codeport",
@@ -129,7 +213,7 @@ async fn models(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Re
         "effective_context_window_percent": 95,
         "input_modalities": ["text"],
         "experimental_supported_tools": []
-    })).collect();
+    })}).collect();
     Json(json!({"object":"list","data":models,"models":codex_models})).into_response()
 }
 
