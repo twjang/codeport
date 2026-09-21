@@ -1,8 +1,8 @@
 # codeport
 
-![Codeport launches your coding agent and translates APIs to reach local or remote models directly, through an SSH tunnel, or through a proxy.](docs/overview.svg)
+![Codeport sets environment variables and launches your coding agent as a child process alongside a local proxy gateway. The gateway translates APIs and connects to local or remote models directly or through an optional SSH tunnel or upstream proxy started and managed by Codeport.](docs/overview.svg)
 
-Run your preferred coding agent against your own model backend. Codeport handles API translation and can start an SSH tunnel or proxy before launching the agent.
+Run your preferred coding agent against your own model backend. Codeport sets the agent’s environment variables, launches it as a child process, and runs a local proxy gateway for API translation. It can also start an SSH tunnel or upstream proxy to reach your backend.
 
 Configure your backends once, then choose how to work:
 
