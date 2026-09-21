@@ -24,7 +24,58 @@ pub struct Config {
     pub backends: BTreeMap<String, Backend>,
     #[serde(default)]
     pub agents: BTreeMap<String, AgentBinding>,
+    #[serde(default)]
+    pub web_search: SearchProvider,
 }
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SearchProvider {
+    #[default]
+    Public,
+    Searxng {
+        url: String,
+    },
+    Brave {
+        api_key: String,
+    },
+}
+impl std::fmt::Debug for SearchProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public => f.write_str("Public (DuckDuckGo)"),
+            Self::Searxng { url } => f.debug_struct("Searxng").field("url", url).finish(),
+            Self::Brave { .. } => f.write_str("Brave { api_key: [redacted] }"),
+        }
+    }
+}
+impl SearchProvider {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Public => {}
+            Self::Searxng { url } => {
+                let url = reqwest::Url::parse(url).context("Invalid SearXNG URL")?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    bail!("SearXNG requires an HTTP(S) base URL without credentials, query parameters, or fragments");
+                }
+            }
+            Self::Brave { api_key } => {
+                if api_key.trim().is_empty()
+                    || reqwest::header::HeaderValue::from_str(api_key).is_err()
+                {
+                    bail!("Invalid Brave Search API key");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Backend {
@@ -112,6 +163,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.web_search.validate()?;
         for (name, backend) in &self.backends {
             if name.trim().is_empty() {
                 bail!("Backend names cannot be empty");
@@ -215,6 +267,53 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn search_defaults_validation_and_secret_storage() {
+        let old: Config = serde_json::from_str(r#"{"backends":{},"agents":{}}"#).unwrap();
+        assert!(matches!(old.web_search, SearchProvider::Public));
+        for provider in [
+            SearchProvider::Public,
+            SearchProvider::Searxng {
+                url: "http://127.0.0.1:8080/searx/".into(),
+            },
+            SearchProvider::Brave {
+                api_key: "search-secret".into(),
+            },
+        ] {
+            let config = Config {
+                web_search: provider,
+                ..Config::default()
+            };
+            assert!(config.validate().is_ok());
+            assert!(!format!("{config:?}").contains("search-secret"));
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("credential.json");
+            config.save_at(&path).unwrap();
+            let loaded = Config::load_from(&path).unwrap();
+            assert_eq!(
+                serde_json::to_value(&config).unwrap(),
+                serde_json::to_value(loaded).unwrap()
+            );
+        }
+        for provider in [
+            SearchProvider::Brave { api_key: "".into() },
+            SearchProvider::Brave {
+                api_key: "bad\nkey".into(),
+            },
+            SearchProvider::Searxng {
+                url: "file:///tmp/search".into(),
+            },
+            SearchProvider::Searxng {
+                url: "https://user:secret@example.com".into(),
+            },
+            SearchProvider::Searxng {
+                url: "https://example.com?q=x".into(),
+            },
+        ] {
+            assert!(provider.validate().is_err());
+        }
+    }
+
     #[test]
     fn rejects_dangling_bindings_and_embedded_secrets() {
         let mut config = Config::default();

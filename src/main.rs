@@ -2,9 +2,12 @@ mod access;
 mod agent_process;
 mod agents;
 mod bridge;
+mod classifier;
 mod config;
+mod hosted_search;
 mod protocol;
 mod tui;
+mod web_search;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -103,9 +106,9 @@ async fn run(cli: Cli) -> Result<u8> {
         &cli.args,
         backend,
         model,
+        config.web_search,
         &mut access,
-        &mut terminate,
-        &mut interrupt,
+        (&mut terminate, &mut interrupt),
     )
     .await;
     access.cleanup().await;
@@ -117,17 +120,21 @@ async fn launch(
     args: &[String],
     backend: config::Backend,
     model: Option<String>,
+    search: config::SearchProvider,
     access: &mut access::AccessSession,
-    terminate: &mut tokio::signal::unix::Signal,
-    interrupt: &mut tokio::signal::unix::Signal,
+    signals: (
+        &mut tokio::signal::unix::Signal,
+        &mut tokio::signal::unix::Signal,
+    ),
 ) -> Result<u8> {
+    let (terminate, interrupt) = signals;
     tokio::select! {
         result = access.start(&backend.url) => result?,
         _ = terminate.recv() => return Ok(143),
         _ = interrupt.recv() => return Ok(130),
     }
     let upstream_protocol = backend.protocol;
-    let bridge = bridge::Bridge::start(backend, model.clone()).await?;
+    let bridge = bridge::Bridge::start_with_search(backend, model.clone(), search).await?;
     let args = if agent == "opencode" {
         agents::opencode_args(args).await?
     } else {

@@ -1,4 +1,6 @@
-use crate::config::{config_path, Access, AgentBinding, Auth, Backend, Config, Protocol};
+use crate::config::{
+    config_path, Access, AgentBinding, Auth, Backend, Config, Protocol, SearchProvider,
+};
 use anyhow::Result;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 
@@ -25,6 +27,7 @@ pub fn run(alternate_path: Option<&std::path::Path>) -> Result<()> {
                 "Edit backend",
                 "Delete backend",
                 "Bind agent",
+                "Configure web search",
                 "View configuration",
                 "Exit",
             ])
@@ -110,6 +113,9 @@ pub fn run(alternate_path: Option<&std::path::Path>) -> Result<()> {
                     .insert(agents[index].to_string(), AgentBinding { backend, model });
             }
             Some(4) => {
+                updated.web_search = edit_search(&config.web_search)?;
+            }
+            Some(5) => {
                 show(&config);
                 continue;
             }
@@ -308,7 +314,75 @@ fn edit_auth(existing: Option<&Auth>) -> Result<Option<Auth>> {
     )
 }
 
+fn edit_search(existing: &SearchProvider) -> Result<SearchProvider> {
+    let theme = ColorfulTheme::default();
+    let default = match existing {
+        SearchProvider::Public => 0,
+        SearchProvider::Searxng { .. } => 1,
+        SearchProvider::Brave { .. } => 2,
+    };
+    let Some(choice) = Select::with_theme(&theme)
+        .with_prompt("Web search provider")
+        .items(&[
+            "Public search (DuckDuckGo, no API key)",
+            "SearXNG instance",
+            "Brave Search API",
+        ])
+        .default(default)
+        .interact_opt()?
+    else {
+        return Ok(existing.clone());
+    };
+    let provider = match choice {
+        0 => SearchProvider::Public,
+        1 => {
+            let current = match existing {
+                SearchProvider::Searxng { url } => url.as_str(),
+                _ => "http://localhost:8080",
+            };
+            let url: String = Input::with_theme(&theme)
+                .with_prompt("SearXNG base URL (JSON output must be enabled)")
+                .with_initial_text(current)
+                .validate_with(|url: &String| {
+                    SearchProvider::Searxng {
+                        url: url.trim().to_owned(),
+                    }
+                    .validate()
+                    .map_err(|err| err.to_string())
+                })
+                .interact_text()?;
+            SearchProvider::Searxng {
+                url: url.trim().to_owned(),
+            }
+        }
+        _ => {
+            let current = match existing {
+                SearchProvider::Brave { api_key } => Some(api_key),
+                _ => None,
+            };
+            let key = Password::with_theme(&theme)
+                .with_prompt(if current.is_some() {
+                    "Brave API key (empty: keep existing)"
+                } else {
+                    "Brave API key"
+                })
+                .allow_empty_password(current.is_some())
+                .interact()?;
+            SearchProvider::Brave {
+                api_key: if key.is_empty() {
+                    current.unwrap().clone()
+                } else {
+                    key
+                },
+            }
+        }
+    };
+    provider.validate()?;
+    Ok(provider)
+}
+
 fn show(config: &Config) {
+    println!("\nWeb search: {:?}", config.web_search);
     for (name, backend) in &config.backends {
         let auth = match &backend.auth {
             None => "none",

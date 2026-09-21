@@ -77,6 +77,7 @@ class Mock(http.server.BaseHTTPRequestHandler):
             self.server.captured.append({
                 "path": self.path, "keys": sorted(body), "model": body.get("model"),
                 "stream": body.get("stream"), "reasoning": body.get("reasoning"),
+                "reasoning_effort": body.get("reasoning_effort"),
                 "thinking": body.get("thinking"), "output_config": body.get("output_config"),
                 "tool_choice": body.get("tool_choice"), "context_management": body.get("context_management"),
                 "tools": [{"type": t.get("type"), "name": t.get("name") or t.get("function", {}).get("name"),
@@ -153,6 +154,10 @@ def run_agent(agent, launcher=None):
             command = [binary, "-p", "--safe-mode", "--setting-sources", "", "--no-session-persistence",
                        "--model", "claude-sonnet-4-5", "--output-format", "json"]
         if launcher:
+            if agent == "claude":
+                # Reproduce explicit effort inherited from a user's environment.
+                # The cross-protocol adapter must override this for the session.
+                env["CLAUDE_CODE_EFFORT_LEVEL"] = "high"
             config_path = Path(directory) / "credential.json"
             config_path.write_text(json.dumps({"backends": {"smoke": {"url": origin, "protocol": "chat_completions", "model": "codeport-smoke-model", "auth": {"type": "bearer", "token": TOKEN}}}, "agents": {agent: {"backend": "smoke"}}}))
             config_path.chmod(0o600)
@@ -167,6 +172,8 @@ def run_agent(agent, launcher=None):
         try:
             result = subprocess.run(command, env=env, cwd=directory, text=True, capture_output=True, timeout=45)
             ok = result.returncode == 0 and ANSWER in result.stdout and bool(server.captured) and (not launcher or server.tool_returned)
+            if launcher and agent == "claude":
+                ok = ok and all(request["output_config"] is None and request["reasoning_effort"] == "none" for request in server.captured)
             if launcher and agent == "codex":
                 ok = ok and "failed to decode models response" not in result.stderr and "Defaulting to fallback metadata" not in result.stdout
             print(json.dumps({"agent": agent, "pass": ok, "returncode": result.returncode,

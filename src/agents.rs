@@ -14,7 +14,7 @@ use tempfile::NamedTempFile;
 
 use crate::config::Protocol;
 
-/// Keep this value alive until the child exits: Pi loads its extension lazily.
+/// Keep temporary agent configuration alive until the child exits.
 pub struct AgentLaunch {
     pub command: Command,
     _extension: Option<NamedTempFile>,
@@ -128,11 +128,22 @@ pub fn prepare(
             }
         }
         "claude" | "claude-code" => {
+            // Allow native WebFetch across domains without depending on Anthropic's
+            // external domain preflight service. This is scoped to this launch.
+            command.args([
+                "--settings",
+                r#"{"skipWebFetchPreflight":true}"#,
+                "--allowedTools",
+                "WebFetch",
+            ]);
             if upstream_protocol != Protocol::Anthropic {
-                eprintln!("codeport: protocol conversion disables Claude extended thinking for this session");
+                eprintln!("codeport: protocol conversion disables Claude extended thinking and explicit effort for this session");
                 command
                     .env("MAX_THINKING_TOKENS", "0")
-                    .env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1");
+                    .env("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "1")
+                    // Thinking and effort are separate controls. `auto` prevents
+                    // recent Claude Code releases sending output_config.effort.
+                    .env("CLAUDE_CODE_EFFORT_LEVEL", "auto");
             }
             command
                 .env("ANTHROPIC_BASE_URL", base)
@@ -403,6 +414,43 @@ mod tests {
             .any(|(key, val)| key == "ANTHROPIC_API_KEY" && val.is_none()));
     }
     #[test]
+    fn claude_preserves_default_search_tool() {
+        for protocol in [
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            Protocol::Anthropic,
+        ] {
+            let launch = prepare(
+                "claude",
+                "http://localhost:1234",
+                "token",
+                None,
+                &[],
+                protocol,
+            )
+            .unwrap();
+            let args: Vec<_> = launch
+                .command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(!args.iter().any(|arg| arg == "--disallowedTools"));
+            assert!(args
+                .windows(2)
+                .any(|args| args == ["--allowedTools", "WebFetch"]));
+            let settings = args
+                .windows(2)
+                .find(|args| args[0] == "--settings")
+                .unwrap();
+            let settings: Value = serde_json::from_str(&settings[1]).unwrap();
+            assert_eq!(settings["skipWebFetchPreflight"], true);
+            assert!(!args.iter().any(|arg| arg.contains("skip-permissions")));
+            assert!(!args.iter().any(|arg| arg == "--mcp-config"));
+            assert!(launch._extension.is_none());
+        }
+    }
+
+    #[test]
     fn opencode_registers_custom_model() {
         let config = opencode_config("http://localhost/v1", "token", Some("local/model"));
         assert_eq!(config["model"], "codeport/local/model");
@@ -458,6 +506,11 @@ mod tests {
         )
         .unwrap();
         assert!(env(&native.command, "MAX_THINKING_TOKENS").is_none());
+        assert!(env(&native.command, "CLAUDE_CODE_EFFORT_LEVEL").is_none());
+        assert_eq!(
+            env(&converted.command, "CLAUDE_CODE_EFFORT_LEVEL").as_deref(),
+            Some("auto")
+        );
         assert_eq!(
             env(&converted.command, "MAX_THINKING_TOKENS").as_deref(),
             Some("0")

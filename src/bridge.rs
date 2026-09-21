@@ -1,5 +1,6 @@
 use crate::{
-    config::{Auth, Backend, Protocol},
+    classifier::{self, Review},
+    config::{Auth, Backend, Protocol, SearchProvider},
     protocol,
 };
 use anyhow::Result;
@@ -29,18 +30,30 @@ pub struct Bridge {
 #[derive(Clone)]
 struct BridgeState {
     backend: Backend,
+    search: SearchProvider,
     model: Option<String>,
     token: String,
     client: reqwest::Client,
 }
 
 impl Bridge {
+    #[cfg(test)]
     pub async fn start(backend: Backend, model: Option<String>) -> Result<Self> {
+        Self::start_with_search(backend, model, SearchProvider::default()).await
+    }
+
+    pub async fn start_with_search(
+        backend: Backend,
+        model: Option<String>,
+        search: SearchProvider,
+    ) -> Result<Self> {
+        search.validate()?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}", listener.local_addr()?);
         let token = uuid::Uuid::new_v4().to_string();
         let state = Arc::new(BridgeState {
             backend,
+            search,
             model,
             token: token.clone(),
             client: reqwest::Client::builder()
@@ -145,6 +158,31 @@ async fn handle(
     if let Some(model) = &state.model {
         body["model"] = json!(model);
     }
+    if incoming == Protocol::Anthropic && incoming != state.backend.protocol {
+        match crate::hosted_search::Search::parse(&body) {
+            Ok(Some(search)) => return hosted_search_response(state, body, search).await,
+            Ok(None) => {}
+            Err(err) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("unsupported hosted search: {err}"),
+                )
+            }
+        }
+    }
+    let review = if incoming == Protocol::Anthropic && incoming != state.backend.protocol {
+        match Review::take(&mut body) {
+            Ok(review) => review,
+            Err(err) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("unsupported safeguards: {err}"),
+                )
+            }
+        }
+    } else {
+        None
+    };
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let custom = if incoming == Protocol::Responses && incoming != state.backend.protocol {
         match protocol::custom_tools(&body) {
@@ -213,7 +251,19 @@ async fn handle(
                 incoming,
                 &custom,
             ) {
-                Ok(body) => Json(body).into_response(),
+                Ok(mut body) => {
+                    if let Some(review) = &review {
+                        let tools = body["content"]
+                            .as_array()
+                            .unwrap_or(&Vec::new())
+                            .iter()
+                            .filter(|b| b["type"] == "tool_use")
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        body["safeguard_results"] = classify(&state, review, Ok(tools)).await;
+                    }
+                    Json(body).into_response()
+                }
                 Err(err) => error(
                     StatusCode::BAD_GATEWAY,
                     &format!("unsupported backend response: {err:#}"),
@@ -259,17 +309,142 @@ async fn handle(
                 let (event, data) = parse_frame(frame);
                 if data.is_empty() { continue; }
                 match converter.push(&event, &data) {
-                    Ok(frames) => for frame in frames { yield Ok(Bytes::from(frame)); },
+                    Ok(frames) => for frame in frames {
+                        let pending = reviewed_frame(&state, review.as_ref(), &converter, frame);
+                        tokio::pin!(pending);
+                        let frame = loop {
+                            tokio::select! {
+                                frame = &mut pending => break frame,
+                                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                                    yield Ok(Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n"));
+                                }
+                            }
+                        };
+                        yield Ok(Bytes::from(frame));
+                    },
                     Err(err) => { yield Ok(stream_error(&format!("unsupported backend stream: {err:#}"))); return; }
                 }
             }
         }
         match converter.finish() {
-            Ok(frames) => for frame in frames { yield Ok(Bytes::from(frame)); },
+            Ok(frames) => for frame in frames {
+                        let pending = reviewed_frame(&state, review.as_ref(), &converter, frame);
+                        tokio::pin!(pending);
+                        let frame = loop {
+                            tokio::select! {
+                                frame = &mut pending => break frame,
+                                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                                    yield Ok(Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n"));
+                                }
+                            }
+                        };
+                        yield Ok(Bytes::from(frame));
+                    },
             Err(err) => yield Ok(stream_error(&format!("incomplete backend stream: {err:#}"))),
         }
     };
     sse_response(Body::from_stream(output))
+}
+
+async fn hosted_search_response(
+    state: Arc<BridgeState>,
+    body: Value,
+    search: crate::hosted_search::Search,
+) -> Response {
+    use crate::hosted_search::{block_events, event};
+    let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let tool_id = format!("srvtoolu_{}", uuid::Uuid::new_v4().simple());
+    let tool = search.tool_block(&tool_id);
+    let message = json!({"id":id,"type":"message","role":"assistant","model":body["model"],"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}});
+    if body["stream"] != true {
+        let (mut blocks, uses) = search.results(&state.search, &tool_id).await;
+        blocks.insert(0, tool);
+        let mut message = message;
+        message["content"] = json!(blocks);
+        message["stop_reason"] = json!("end_turn");
+        message["usage"]["server_tool_use"] = json!({"web_search_requests":uses});
+        return Json(message).into_response();
+    }
+    let output = async_stream::stream! {
+        yield Ok::<Bytes,std::io::Error>(Bytes::from(event(json!({"type":"message_start","message":message}))));
+        for frame in block_events(0,&tool) { yield Ok(Bytes::from(frame)); }
+        let pending = search.results(&state.search,&tool_id);
+        tokio::pin!(pending);
+        let (blocks,uses) = loop {
+            tokio::select! {
+                result = &mut pending => break result,
+                _ = tokio::time::sleep(Duration::from_secs(10)) => yield Ok(Bytes::from(event(json!({"type":"ping"})))),
+            }
+        };
+        for (index,block) in blocks.iter().enumerate() {
+            for frame in block_events(index+1,block) { yield Ok(Bytes::from(frame)); }
+        }
+        yield Ok(Bytes::from(event(json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0,"server_tool_use":{"web_search_requests":uses}}}))));
+        yield Ok(Bytes::from(event(json!({"type":"message_stop"}))));
+    };
+    sse_response(Body::from_stream(output))
+}
+
+async fn classify(state: &BridgeState, review: &Review, tools: Result<Vec<Value>>) -> Value {
+    let (pending, allowed) = match tools.and_then(classifier::allow_web_tools) {
+        Ok(parts) => parts,
+        Err(_) => return classifier::unavailable("error"),
+    };
+    let result = review_tools(state, review, &pending).await;
+    classifier::merge_web_results(result, allowed, &pending)
+}
+
+async fn review_tools(state: &BridgeState, review: &Review, tools: &[Value]) -> Value {
+    if tools.is_empty() {
+        return classifier::available(json!({}));
+    }
+    let operation = async {
+        let body = protocol::convert_request(
+            review.request(tools)?,
+            Protocol::Anthropic,
+            state.backend.protocol,
+        )?;
+        let mut request = state
+            .client
+            .post(endpoint(&state.backend.url, state.backend.protocol)?)
+            .json(&body);
+        request = match &state.backend.auth {
+            Some(Auth::Bearer { token }) => request.bearer_auth(token),
+            Some(Auth::Basic { username, password }) => {
+                request.basic_auth(username, Some(password))
+            }
+            None => request,
+        };
+        let response = request.send().await?.error_for_status()?;
+        let reply = response.json::<Value>().await?;
+        let reply = protocol::convert_response(reply, state.backend.protocol, Protocol::Anthropic)?;
+        classifier::results(&reply, tools)
+    };
+    match tokio::time::timeout(Duration::from_secs(60), operation).await {
+        Ok(Ok(results)) => results,
+        Ok(Err(_)) => {
+            eprintln!("codeport: tool review failed; proposed actions remain blocked");
+            classifier::unavailable("error")
+        }
+        Err(_) => classifier::unavailable("timeout"),
+    }
+}
+
+async fn reviewed_frame(
+    state: &BridgeState,
+    review: Option<&Review>,
+    converter: &protocol::StreamConverter,
+    frame: String,
+) -> String {
+    let Some(review) = review else { return frame };
+    let (event, data) = parse_frame(&frame);
+    if event != "message_delta" {
+        return frame;
+    }
+    // The converter creates valid JSON. Delay completion until every tool has a verdict.
+    let mut value: Value = serde_json::from_str(&data).expect("generated SSE JSON");
+    value["delta"]["safeguard_results"] = classify(state, review, converter.tool_uses()).await;
+    format!("event: message_delta\ndata: {value}\n\n")
 }
 
 fn sse_response(body: Body) -> Response {

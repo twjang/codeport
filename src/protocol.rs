@@ -479,6 +479,7 @@ pub fn convert_request(mut v: Value, from: Protocol, to: Protocol) -> Result<Val
         }
     }
     for key in [
+        "safeguards",
         "previous_response_id",
         "conversation",
         "response_format",
@@ -525,7 +526,10 @@ pub fn convert_request(mut v: Value, from: Protocol, to: Protocol) -> Result<Val
     }
     let effort = v["reasoning"]["effort"]
         .as_str()
-        .or_else(|| v["reasoning_effort"].as_str());
+        .or_else(|| v["reasoning_effort"].as_str())
+        // Anthropic requests without thinking (or with thinking disabled) must
+        // not turn on a reasoning backend's default thinking during translation.
+        .or_else(|| (from == Protocol::Anthropic).then_some("none"));
     if let Some(effort) = effort {
         if to == Protocol::Anthropic {
             if effort != "none" {
@@ -913,6 +917,16 @@ impl StreamConverter {
             pending_reason: None,
             custom: CustomTools::default(),
         }
+    }
+    pub fn tool_uses(&self) -> Result<Vec<Value>> {
+        self.blocks
+            .values()
+            .filter(|b| b.tool)
+            .map(|b| {
+                let input: Value = serde_json::from_str(&b.text)?;
+                Ok(json!({"type":"tool_use","id":b.id,"name":b.name,"input":input}))
+            })
+            .collect()
     }
     pub fn with_custom_tools(mut self, custom: CustomTools) -> Self {
         self.custom = custom;
@@ -1359,6 +1373,41 @@ impl StreamConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anthropic_without_thinking_disables_upstream_reasoning() {
+        for thinking in [Value::Null, json!({"type":"disabled"})] {
+            let mut request =
+                json!({"model":"local","messages":[{"role":"user","content":"hello"}]});
+            if !thinking.is_null() {
+                request["thinking"] = thinking;
+            }
+            let chat = convert_request(
+                request.clone(),
+                Protocol::Anthropic,
+                Protocol::ChatCompletions,
+            )
+            .unwrap();
+            assert_eq!(chat["reasoning_effort"], "none");
+            let responses =
+                convert_request(request.clone(), Protocol::Anthropic, Protocol::Responses).unwrap();
+            assert_eq!(responses["reasoning"]["effort"], "none");
+            assert_eq!(
+                convert_request(request.clone(), Protocol::Anthropic, Protocol::Anthropic).unwrap(),
+                request
+            );
+        }
+        for thinking in [
+            json!({"type":"enabled","budget_tokens":1024}),
+            json!({"type":"adaptive"}),
+        ] {
+            let request =
+                json!({"messages":[{"role":"user","content":"hello"}],"thinking":thinking});
+            assert!(
+                convert_request(request, Protocol::Anthropic, Protocol::ChatCompletions).is_err()
+            );
+        }
+    }
+
     #[test]
     fn namespaced_tools_preserve_identity_through_replies_and_history() {
         let request = json!({"input":"read", "tools":[
