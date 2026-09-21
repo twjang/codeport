@@ -9,8 +9,8 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::{io::Write, process::Command};
-use tempfile::NamedTempFile;
+use std::{io::Write, path::Path, process::Command};
+use tempfile::{NamedTempFile, TempDir};
 
 use crate::config::Protocol;
 
@@ -18,6 +18,47 @@ use crate::config::Protocol;
 pub struct AgentLaunch {
     pub command: Command,
     _extension: Option<NamedTempFile>,
+    _codex_home: Option<TempDir>,
+}
+
+/// CLI overrides do not isolate writes made by Codex itself. Give each launch
+/// private settings and caches, while retaining access to existing sessions,
+/// skills and other persistent resources. Never restore a global config after
+/// exit: another Codex process may have legitimately changed it meanwhile.
+fn isolated_codex_home(source: &Path) -> Result<TempDir> {
+    let home = tempfile::Builder::new()
+        .prefix("codeport-codex-")
+        .tempdir()?;
+    let entries = match std::fs::read_dir(source) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(home),
+        Err(error) => return Err(error).context("Reading Codex home"),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        // Runtime IPC must not connect this launch to the ordinary Codex daemon.
+        // Model catalogs fetched through the bridge must also stay private.
+        if matches!(
+            name.to_str(),
+            Some("models_cache.json" | "cache" | "ipc" | "tmp" | ".tmp")
+        ) {
+            continue;
+        }
+        let source = entry.path();
+        let target = home.path().join(&name);
+        if matches!(
+            source.extension().and_then(|ext| ext.to_str()),
+            Some("toml" | "json")
+        ) {
+            std::fs::copy(&source, &target)
+                .with_context(|| format!("Copying Codex settings {}", source.display()))?;
+        } else {
+            std::os::unix::fs::symlink(std::path::absolute(&source)?, &target)
+                .with_context(|| format!("Linking Codex resource {}", source.display()))?;
+        }
+    }
+    Ok(home)
 }
 
 impl AgentLaunch {
@@ -96,9 +137,18 @@ pub fn prepare(
         agent
     });
     let mut extension = None;
+    let mut codex_home = None;
     command.env("CODEPORT_API_KEY", token);
     match agent {
         "codex" => {
+            let source = std::env::var_os("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".codex")))
+                .context("HOME and CODEX_HOME are unset; cannot locate Codex settings")?;
+            let home = isolated_codex_home(&source)?;
+            command.env("CODEX_HOME", home.path());
+            codex_home = Some(home);
             if upstream_protocol != Protocol::Responses {
                 eprintln!("codeport: protocol conversion disables Codex reasoning and provider-hosted search for this session");
                 for setting in [
@@ -110,7 +160,7 @@ pub fn prepare(
                     command.args(["-c", setting]);
                 }
             }
-            // CLI overrides retain the user's sessions, tools, permissions and settings.
+            // CLI overrides apply on top of the private copy of user settings.
             // JSON quoted strings are also valid TOML basic strings for these values.
             for setting in [
                 "model_provider=\"codeport\"".to_owned(),
@@ -192,6 +242,7 @@ pub fn prepare(
     Ok(AgentLaunch {
         command,
         _extension: extension,
+        _codex_home: codex_home,
     })
 }
 
@@ -287,6 +338,45 @@ fn pi_extension(base: &str, api: &str, token: &str, model: Option<&str>) -> Stri
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    #[test]
+    fn codex_settings_are_private_but_sessions_and_skills_remain_accessible() {
+        let original = tempfile::tempdir().unwrap();
+        let root = original.path();
+        std::fs::write(root.join("config.toml"), "model = \"original\"").unwrap();
+        std::fs::write(root.join("work.config.toml"), "model = \"work\"").unwrap();
+        std::fs::write(root.join("models_cache.json"), "original catalog").unwrap();
+        for name in ["sessions", "skills", "ipc", "cache"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let first = isolated_codex_home(root).unwrap();
+        let second = isolated_codex_home(root).unwrap();
+        for name in ["config.toml", "work.config.toml"] {
+            assert!(!first.path().join(name).is_symlink());
+            std::fs::write(first.path().join(name), "model = \"qwen\"").unwrap();
+            assert_eq!(
+                std::fs::read(root.join(name)).unwrap(),
+                std::fs::read(second.path().join(name)).unwrap()
+            );
+        }
+        for name in ["models_cache.json", "ipc", "cache"] {
+            assert!(!first.path().join(name).exists());
+        }
+        for name in ["sessions", "skills"] {
+            std::fs::write(first.path().join(name).join("new"), "shared").unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.join(name).join("new")).unwrap(),
+                "shared"
+            );
+        }
+        // A concurrent ordinary Codex write must survive cleanup.
+        std::fs::write(root.join("config.toml"), "model = \"changed\"").unwrap();
+        drop(first);
+        assert_eq!(
+            std::fs::read_to_string(root.join("config.toml")).unwrap(),
+            "model = \"changed\""
+        );
+    }
+
     #[test]
     fn opencode_standalone_preserves_subcommands_and_literal_arguments() {
         let args = ["run", "--", "literal prompt"].map(str::to_owned);

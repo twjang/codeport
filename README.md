@@ -1,8 +1,8 @@
 # codeport
 
-![Codeport sets environment variables and launches your coding agent as a child process alongside a local proxy gateway. The gateway translates APIs and connects to local or remote models directly or through an optional SSH tunnel or upstream proxy started and managed by Codeport.](docs/overview.svg)
+Run your preferred coding agent against a local or remote model backend. Codeport configures and launches the agent, translates API requests, and can set up an SSH tunnel or proxy for the session.
 
-Run your preferred coding agent against your own model backend. Codeport sets the agent’s environment variables, launches it as a child process, and runs a local proxy gateway for API translation. It can also start an SSH tunnel or upstream proxy to reach your backend.
+![Codeport connects your coding agent to a local or remote model, with an optional managed SSH tunnel or proxy.](docs/overview.svg)
 
 Configure your backends once, then choose how to work:
 
@@ -17,260 +17,115 @@ Supported coding agents: **Pi**, **OpenCode**, **Codex (experimental)**, and **C
 
 Codex and Claude Code integrations are still under development; some tools and workflows may fail.
 
-`local` and `home-gpu` are example backend names you create in the configuration UI. Agent sessions run in your current directory, with connection settings scoped to the launched process.
+`local` and `home-gpu` are example backend names you create in the configuration UI. Launch Codeport from the project directory you want to work in.
 
 ## Quick start
 
-On Linux or macOS, use Rust 1.86 or newer and have your coding agent installed on `PATH`. From this repository:
+You need Linux or macOS, Rust 1.86 or newer, an installed coding agent, and a running model API server. Have your server's URL, model ID, and any required credentials ready. Ensure the agent and Cargo's bin directory (usually `~/.cargo/bin`) are on `PATH`.
+
+Install from this repository, then open the configuration UI:
 
 ```sh
 cargo install --locked --path .
 codeport -cfg
+```
+
+Choose **Add backend**, give it a name such as `local`, and enter its connection details:
+
+- **URL:** the API base URL, such as `http://127.0.0.1:8000/v1`.
+- **Protocol:** OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages, matching your backend.
+- **Model:** the exact model ID advertised by your backend, including any namespace.
+- **Authentication:** a bearer token, HTTP Basic credentials, or none, as required by your backend.
+
+Choose **Direct** for **Backend access** if the server is already reachable. For a remote server that needs a tunnel, follow [SSH tunnels and proxies](#ssh-tunnels-and-proxies).
+
+Choose **Bind agent**, select your agent and backend, then **Exit**. From your project directory, start the agent:
+
+```sh
 codeport opencode
 ```
 
-In the configuration UI, add your backend URL, protocol, exact model ID, and credentials, then bind your agent to it. Replace `opencode` with `pi`, `codex`, or `claude` as needed. Ensure Cargo's bin directory (usually `~/.cargo/bin`) is on `PATH`.
+Replace `opencode` with `pi`, `codex`, or `claude` to launch another agent. Forward agent options after `--`:
 
-Forward agent options after `--`, for example `codeport claude -- --continue`.
-
-## Configuration and credentials
-
-On both Linux and macOS, the file is:
-
-```text
-~/.config/codeport/credential.json
+```sh
+codeport claude -- --continue
 ```
 
-`--config PATH` selects an alternate credential file for both configuration UI and launching. Without it, the default path above is used.
+## Configuration
+
+Run `codeport -cfg` to edit backends, agent defaults, credentials, and web-search settings.
+
+A model supplied with `--model` overrides the agent's saved model, which overrides the backend's default. Leave both model fields blank in the UI to keep the agent's own selection. For OpenCode, set a model explicitly unless you use its native OpenAI or Anthropic provider.
+
+Using a local model through Codeport leaves your ordinary Codex model default unchanged. Your existing Codex sessions and skills remain accessible, but model and settings changes made inside a Codeport-launched Codex session are discarded on exit. To change your usual Codex defaults, launch Codex directly.
+
+Configuration and credentials are stored in `~/.config/codeport/credential.json`. Credentials are plaintext, protected by restricted file permissions. To use a separate configuration:
 
 ```sh
 codeport --config ./credential.json -cfg
 codeport --config ./credential.json opencode
 ```
 
-If upgrading from `launchcoder`, copy your existing
-`~/.config/launchcoder/credential.json` to `~/.config/codeport/credential.json`
-with directory permissions `0700` and file permissions `0600`. Alternatively,
-use `codeport --config ~/.config/launchcoder/credential.json opencode` to keep
-using the existing file. The configuration format is unchanged.
+## SSH tunnels and proxies
 
-The file contains both configuration and credentials. Writes use an atomic replacement with file permissions `0600`; newly created configuration directories use `0700`. Existing parent directory permissions are preserved, including when using `--config`. Loading an existing regular file corrects its permissions to `0600`; a symbolic link is rejected. Credentials are plaintext, protected by filesystem permissions, and are masked in interactive password prompts.
+Codeport can start a connection command before launching your agent and stop it when the session ends. For a backend already reachable from your machine, choose **Direct** under **Backend access**.
 
-Example configuration:
+For example, to reach a model server listening on port `8000` on an SSH host named `home-gpu`, edit the backend in `codeport -cfg`:
 
-```json
-{
-  "backends": {
-    "local": {
-      "url": "http://127.0.0.1:8000/v1",
-      "protocol": "chat_completions",
-      "model": "my-coding-model",
-      "auth": {
-        "type": "bearer",
-        "token": "replace-with-your-token"
-      },
-      "access": null
-    },
-    "home-gpu": {
-      "url": "http://127.0.0.1:18000/v1",
-      "protocol": "anthropic",
-      "model": "",
-      "auth": {
-        "type": "basic",
-        "username": "developer",
-        "password": "replace-with-your-password"
-      },
-      "access": {
-        "command": "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L 127.0.0.1:18000:127.0.0.1:8000 home-gpu",
-        "persistent": true,
-        "cleanup": null,
-        "timeout_secs": 30
-      }
-    }
-  },
-  "agents": {
-    "pi": { "backend": "local", "model": null },
-    "opencode": { "backend": "local", "model": null },
-    "codex": { "backend": "local", "model": null },
-    "claude": { "backend": "home-gpu", "model": "" }
-  }
-}
-```
+1. Set the backend URL to `http://127.0.0.1:18000/v1`.
+2. Choose **Command** under **Backend access** and enter:
 
-Protocol values are `chat_completions`, `responses`, and `anthropic`. Set the base URL to the API prefix expected by the server, usually ending in `/v1`, rather than a complete `/chat/completions`, `/responses`, or `/messages` endpoint.
+   ```sh
+   ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L 127.0.0.1:18000:127.0.0.1:8000 home-gpu
+   ```
 
-Authentication can be `null`, a bearer token, or HTTP Basic. Only one authentication method is used per backend. Upstream credentials remain in the bridge; agents receive a separate random credential for the loopback connection.
+3. Choose **Stay running during the agent session** for the command lifecycle.
+4. Save the backend, then launch with `codeport opencode --backend home-gpu`.
 
-Model precedence is CLI `--model`, agent binding, then backend default. Missing or `null` fields inherit the next default. An explicit empty string suppresses a model override and preserves the model requested by the agent. In the UI, leaving a model field blank stores `null`; leave both the binding and backend model blank to preserve the agent's selection.
+Replace `home-gpu` and the ports with your own connection details. SSH must be installed and able to authenticate without a password prompt. Codeport waits for the local port to become reachable before launching the agent. If the tunnel exits unexpectedly, the agent session stops too.
 
-Use the exact model ID advertised by your backend's `/v1/models` endpoint,
-including any namespace. For example, the verified local Qwen backend requires
-`unsloth/Qwen3.8-27B-GGUF`; the shortened name `Qwen3.8-27B-GGUF` returned a
-model-not-found error. Save the full ID as the backend model in `codeport -cfg`,
-or override it for one session:
-
-```sh
-codeport opencode --model unsloth/Qwen3.8-27B-GGUF
-```
-
-To check a configured OpenCode backend without opening the interactive UI:
-
-```sh
-codeport opencode -- run --format json 'Reply with only OK. Do not use tools or change any files.'
-```
-
-If the backend returns `401 Unauthorized`, update its authentication settings in
-`codeport -cfg`. For `404` model errors, check the exact model ID and whether
-the server has loaded that model or allows switching models by request.
-
-## Backend access
-
-The launcher gives interactive agents the foreground terminal and restores it afterward. It owns the agent's process group, forwards externally received termination signals, and terminates remaining tool subprocesses when the session ends. Any access utilities must already be installed and available on `PATH`.
-
-Set `access` to `null` for direct access, or configure a command:
-
-- `command` runs through `/bin/sh -c`, inherits the environment and current directory, and receives no interactive stdin. Authenticate SSH, Teleport, VPN clients, or other tools beforehand.
-- `persistent: false` waits for the command to finish successfully before checking readiness.
-- `persistent: true` keeps the command running during the session. Its unexpected exit stops the launched agent.
-- `timeout_secs` bounds startup and readiness. The URL must be fixed; dynamically returned URLs are not supported.
-- `cleanup` is an optional shell command used after a started access session, including startup failures and handled termination signals.
-
-Readiness checks whether the configured host and port accept TCP connections. It does not validate authentication, model availability, or API behavior.
-
-On exit, the cleanup command runs first, with a ten-second timeout. The launcher then terminates its owned persistent access process group, including descendants. Once a preparation command has exited and been reaped, the launcher no longer retains its process-group ID; use the cleanup command to stop any background service it started. Persistent commands should stay in the foreground rather than daemonizing. A cleanup error is reported without replacing the agent's exit status. Cleanup cannot run after an uncatchable process termination such as `SIGKILL`.
+You can configure a proxy or another access utility the same way. Install and authenticate it beforehand; access commands cannot prompt for input. Commands that only prepare a connection can use **Finish before launching the agent**, with an optional cleanup command to stop any background service they start.
 
 ## Web search for Claude Code
 
-Claude keeps its default `WebSearch` tool. On Chat Completions and Responses
-backends, Codeport handles the standalone `web_search_20250305` request sent by
-that tool and returns search results in Claude's expected format. No custom tools
-or MCP server are installed. Native Anthropic backends retain their own hosted
-search implementation. File reading, editing, shell commands, and `WebFetch`
-remain Claude Code's built-in tools.
+Claude's built-in `WebSearch` works with public DuckDuckGo search by default when using a Chat Completions or Responses backend. No search API key is needed. Native Anthropic backends keep their own search service.
 
-Codeport allows native `WebFetch` for all domains and sets
-`skipWebFetchPreflight=true` for the launched session, so fetching does not depend
-on Anthropic's external domain check. Explicit deny rules and managed policies
-still apply. Websites can still reject requests (for example, HTTP 403), require
-login, or require JavaScript. These settings do not change your saved Claude
-configuration or bypass permissions for other tools.
+To change providers, open `codeport -cfg` → **Configure web search**:
 
-For example, ask Claude to “search the web for the Rust documentation.” Public
-search through DuckDuckGo Lite is the default and needs no API key. Availability and
-result quality depend on the provider. Bot challenges and unrecognized provider
-pages return explicit errors. Search budgets and domain allow/block
-lists are honored. General hosted-search conversations, dynamic filtering, and
-location options are not supported by this compatibility path.
+- **Public:** DuckDuckGo, with no setup or API key.
+- **SearXNG:** enter your instance's base URL and enable JSON results in its `search.formats` setting.
+- **Brave:** enter your Brave Search API key.
 
-Queries go only to the selected provider. Model-backend credentials are never
-attached to search requests. Search has a 30-second timeout and a 2 MiB response
-limit. Public-search redirects are checked to reject private/local addresses.
-Search connections do not use the model backend's SSH tunnel or HTTP proxy.
+Search queries go to the selected provider directly, without using the model backend's SSH tunnel or proxy. Public search may encounter rate limits or bot challenges; Codeport reports failures without switching providers automatically.
 
-Choose a provider with `codeport -cfg` → **Configure web search**:
+Codeport enables Claude's built-in `WebFetch` across domains for the session. Explicit deny rules and managed policies still apply. Websites may reject requests, require login, or depend on JavaScript, so some pages cannot be fetched.
 
-- **Public** (default): no setup or API key.
-- **SearXNG**: enter your instance's base URL, including a path prefix if needed. Local/LAN instances and custom ports are supported. Enable `json` in the instance's `search.formats` setting ([SearXNG API docs](https://docs.searxng.org/dev/search_api.html)).
-- **Brave**: enter your Brave Search API key in the hidden prompt. The key is saved in the existing `0600` credential file and sent only to Brave's HTTPS API.
+## Compatibility and limitations
 
-The optional top-level `web_search` field in the credential file selects one of:
+Codex and Claude Code support is experimental. Text conversations and tool calls are supported across API protocols, but some agent features require a matching backend protocol:
 
-```json
-{"provider": "public"}
-```
+- **Codex:** reasoning and hosted web search are disabled when translating to another protocol.
+- **Claude Code:** extended thinking and explicit reasoning effort are disabled when translating to another protocol.
+- **Images and other advanced features:** may be unavailable during protocol translation.
 
-```json
-{"provider": "searxng", "url": "http://localhost:8080"}
-```
-
-```json
-{"provider": "brave", "api_key": "YOUR_BRAVE_SEARCH_API_KEY"}
-```
-
-For example, add `"web_search": {"provider": "searxng", "url": "http://localhost:8080"}`
-alongside `backends` and `agents`. Omitting it keeps public search. Provider errors
-are reported without silently switching providers. Configured provider endpoints
-do not follow redirects; use the final SearXNG URL. A local SearXNG endpoint is used only for searches explicitly routed to it.
-
-## Protocol compatibility
-
-The bridge accepts OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages. Same-protocol requests are forwarded to preserve native features. Cross-protocol translation targets text conversations, streamed responses, function/tool calls, and tool results used in repeated agent turns.
-
-For cross-protocol launches, the Codex adapter disables its default reasoning and hosted web-search features, and the Claude Code adapter disables thinking and explicit effort (`CLAUDE_CODE_EFFORT_LEVEL=auto`); the launcher announces these compatibility settings. Same-protocol launches retain native behavior.
-
-When translating Anthropic requests with thinking omitted or disabled, Codeport
-explicitly disables upstream reasoning too, so a local model's default thinking
-mode does not produce reasoning content the bridge cannot preserve.
-
-Claude Code auto mode is supported when translating to Chat Completions or
-Responses. When Claude requests `dangerous_tool_use` safeguards, Codeport sends a
-separate review to the configured backend and model, without tools, using the
-conversation, permission context, and proposed tool calls. Native `WebFetch` and
-`WebSearch` calls are automatically allowed by Codeport's classifier without an
-extra model request. Other tools in the same response still require review; a
-failed review blocks those tools while preserving the web-tool approvals. It returns each verdict
-to Claude before completing the response. Denied actions stay blocked; timeouts,
-failed reviews, and malformed or incomplete verdicts also block execution. Native
-Anthropic backends receive the safeguards request unchanged.
+Claude auto mode is available with Chat Completions and Responses backends:
 
 ```sh
 codeport claude -- --permission-mode auto
 ```
 
-Review adds an inference request for each response containing tool calls. Its
-judgment depends on the configured model; this is Codeport's reviewer, not
-Anthropic's trained classifier. Review requests have a 60-second timeout and a
-1 MiB input limit; authorization context is never silently truncated.
+Codeport uses your configured model to review proposed actions, so permission decisions depend on that model and may add latency. Native web searches and fetches are automatically allowed by Codeport's reviewer; other actions remain blocked if their review fails. This review differs from Anthropic's own classifier.
 
-Translation is not complete API emulation. Opaque reasoning state, multimodal content, built-in hosted tools, and other features without a supported mapping produce explicit errors instead of silently losing data. An agent or backend that requires those features may need a matching protocol or different agent settings.
-
-Real clients have passed local mock API smoke checks for streamed text and tool roundtrips: Codex 0.155.0 and 0.155.1, Claude Code 2.1.208 and 2.1.278, Pi 0.85.1, and OpenCode 1.18.31 and 2.0.10. OpenCode 2.0.10 has also completed a live text request against a local Unsloth backend serving `unsloth/Qwen3.8-27B-GGUF`. Codex 0.155.1 has also completed a live text request and a shell-tool roundtrip against that backend. Claude Code 2.1.278 has completed live text, Read-tool, and auto-mode Bash arithmetic checks against the same backend. Paid model backends have not been verified. Compatibility with other agent releases or backend implementations still needs verification.
-
-For Codex, the bridge translates namespaced function and custom tools to unique
-backend tool names and restores their namespaces in replies. Its model endpoint
-also supplies Codex-compatible metadata for the configured model, using text-only
-input and a conservative 32,768-token context window. This is a compatibility
-default, not detection of the backend's actual limit. Override it when needed,
-for example `codeport codex -- -c model_context_window=65536` if your backend
-supports that context size.
-
-With no explicit model, OpenCode preserves saved selections from its native OpenAI or Anthropic providers. Configure a model override for other provider selections.
-
-For OpenCode 2, the launcher automatically selects `--standalone` so its private
-server receives the session's local provider and model configuration. The shared
-background server does not inherit these settings. OpenCode 1 retains its existing
-launch behavior.
-
-To reproduce the Pi/OpenCode checks with isolated package installation:
+Codex defaults to a 32,768-token context window. If your backend supports a different size, set it explicitly:
 
 ```sh
-npm --prefix /tmp/codeport-smoke-tools install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.85.1 opencode-ai@1.18.31
-cargo build --locked
-python3 scripts/smoke_open_agents.py --launcher target/debug/codeport --agent-bin /tmp/codeport-smoke-tools/node_modules/.bin
+codeport codex -- -c model_context_window=65536
 ```
 
-For installed Codex and Claude Code clients, run `python3 scripts/smoke_agents.py --launcher target/debug/codeport`.
+## Troubleshooting
 
-The smoke harness creates temporary per-agent configuration directories, uses fake credentials and a local streaming backend, and asks each agent to read a temporary fixture before completing. HTTP proxy settings reject external proxy requests; no upstream model credentials are inherited. Pi's current package name follows its [official installation documentation](https://github.com/earendil-works/pi/tree/main/packages/coding-agent).
-
-## Development and platform builds
-
-```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --all -- --check
-python3 scripts/smoke_tui.py
-```
-
-CI runs these checks on Linux and macOS, plus an MSRV check on Rust 1.86 that also exercises `cargo install --path .` with fresh dependency resolution. Release-mode artifact jobs target:
-
-| Platform | Rust target | Build method |
-| --- | --- | --- |
-| Linux x86-64 | `x86_64-unknown-linux-musl` | `cross` on Linux |
-| Linux ARM64 | `aarch64-unknown-linux-musl` | `cross` on Linux |
-| macOS Intel | `x86_64-apple-darwin` | Native Intel runner |
-| macOS Apple Silicon | `aarch64-apple-darwin` | Native ARM64 runner |
-
-Linux builds use musl for static binaries; a normal native Linux `cargo build` may target glibc instead. macOS builds use the native system runtime. Rustls handles outbound TLS without requiring an OpenSSL installation.
-
-The workflow stores compressed build artifacts and does not publish releases. Its platform matrix follows the [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners); Linux cross-compilation uses [actions-rust-cross](https://github.com/houseabsolute/actions-rust-cross).
+- **Agent or `codeport` not found:** check that the executable is installed and on `PATH`.
+- **401 Unauthorized:** update the backend's credentials with `codeport -cfg`.
+- **Model not found:** check the exact model ID, including its namespace, and confirm the server has loaded it.
+- **Connection timeout:** check the backend URL, server availability, and any SSH or proxy command. A reachable port alone does not confirm valid credentials or a loaded model.
+- **WebFetch blocked or rejected:** restart Codeport after updating it. Website errors such as HTTP 402 or 403 can still prevent fetching even when Codeport allows the request.

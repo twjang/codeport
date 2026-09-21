@@ -17,6 +17,10 @@ fn fixture(
     persistent: bool,
 ) -> (tempfile::TempDir, Command, std::net::TcpListener) {
     let directory = tempfile::tempdir().unwrap();
+    let codex_home = directory.path().join("codex-home");
+    fs::create_dir(&codex_home).unwrap();
+    fs::write(codex_home.join("config.toml"), "model = \"original\"\n").unwrap();
+    fs::write(codex_home.join("models_cache.json"), "original catalog").unwrap();
     let agent = directory.path().join("codex");
     fs::write(&agent, format!("#!/bin/sh\n{agent_script}\n")).unwrap();
     fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
@@ -33,6 +37,7 @@ fn fixture(
         .arg("--config")
         .arg(&config)
         .arg("codex")
+        .env("CODEX_HOME", &codex_home)
         .env(
             "PATH",
             format!(
@@ -45,6 +50,39 @@ fn fixture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     (directory, command, listener)
+}
+
+#[test]
+fn codex_model_writes_do_not_change_global_defaults() {
+    let (directory, mut command, _listener) = fixture(
+        "printf '%s' \"$CODEX_HOME\" > \"$LAUNCH_HOME_MARKER\"\n\
+         printf 'model = \"qwen\"\\n' > \"$CODEX_HOME/config.toml\"\n\
+         printf 'local catalog' > \"$CODEX_HOME/models_cache.json\"\n\
+         exit 23",
+        "true",
+        false,
+    );
+    let marker = directory.path().join("launch-home");
+    command.env("LAUNCH_HOME_MARKER", &marker);
+    let output = command.output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(23),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = directory.path().join("codex-home");
+    assert_eq!(
+        fs::read_to_string(original.join("config.toml")).unwrap(),
+        "model = \"original\"\n"
+    );
+    assert_eq!(
+        fs::read_to_string(original.join("models_cache.json")).unwrap(),
+        "original catalog"
+    );
+    let temporary = fs::read_to_string(marker).unwrap();
+    assert_ne!(std::path::Path::new(&temporary), original);
+    assert!(!std::path::Path::new(&temporary).exists());
 }
 
 #[test]

@@ -72,7 +72,11 @@ def main():
             send()
             expect("Saved to")
             expect("Add backend")
-            send(b"\x1b[B" * 5 + b"\r")
+            # Exit is the final item. Wrap upward from the default first item
+            # so adding another menu action cannot silently select the wrong one.
+            send(b"\x1b[A")
+            expect("❯ Exit")
+            send()
             deadline = time.monotonic() + 5
             while child.poll() is None:
                 assert time.monotonic() < deadline, f"TUI did not exit: {buffer!r}"
